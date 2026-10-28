@@ -28,13 +28,13 @@ It never submits anything by itself: you check the form, press Preview and submi
   - on splits and Various Artists releases: `Artist - Title`
 - **Text**: straight apostrophes and quotes, plain hyphens, round brackets, no invisible or "decorative" characters.
 - **Capitalization**: Rym rules for English titles, first letter only for other languages, with the special rules for Turkish, Indonesian, Filipino, French, Dutch and Russian. German and non-Latin scripts are left as they are. The language is detected title by title, and you can switch it with a checkbox.
-- **Sources**: the link and the list of data taken from it, in English for the moderators.
+- **Sources**: the Discogs or Bandcamp link.
 
 ## What it suggests
 
 Uncertain choices are never applied by themselves: they appear as buttons under the **To do** list, and you click only the ones you agree with.
 
-- **Credit lines** with Rym roles and tracks (`A1 to B3` → `A1-A6, B1-B3`), featured and guest included. Press 🔍 on a line to search the artist: when you click the result, the line becomes linked.
+- **Credit lines** with the official Rym roles (`Mastered By` → `mastering engineer`, `Vocals [Backing]` → `backing vocals`) and tracks (`A1 to B3` → `A1-A6, B1-B3`), featured and guest included. Press 🔍 on a line to search the artist: when you click the result, the line becomes linked.
 - **Credited name** with "featuring" / "with" or a name variation.
 - **Edition name** (for example `30th Anniversary Edition`), only for secondary issues.
 - **Languages** of the lyrics, estimated from the titles.
@@ -72,17 +72,16 @@ An Italian version is also available: [`postino.it.user.js`](postino.it.user.js)
 5. Press **Fill form**.
 6. Read the **To do** list, use the buttons you need, check everything, then press **Preview** and submit.
 
-Checkboxes in the panel (they only prepare the data: press **Fill form** to apply them):
+Checkboxes in the panel (hover them for a short explanation; they only prepare the data: press **Fill form** to apply them):
 
 - **English capitalization**: untick it for non-English titles (first letter only).
 - **Keep source capitalization**: leaves names and titles as on Discogs or Bandcamp, for the official stylings the Rym wiki allows (explain why in the sources).
 - **Import track times** (vinyl only): Rym wants track times on vinyl only if they are printed on the record. Hidden when the Discogs notes say they are not printed.
-- **I own a copy**: adds "I own this release" to the sources. It stays saved.
 
 ## Known limits
 
 - **Rym has no API**: you still pick every artist and the label from the search results. For splits you add each artist yourself (one search button per artist).
-- **Credit roles** are translated from Discogs for the most common ones: check them at preview.
+- **Credit roles** are matched against the Rym list of music roles: the ones not found are listed in the To do list, to fix by hand.
 - **Proper names** in non-English titles cannot be detected: check them by hand.
 - **Estimates**: the release type, the languages and some attributes are estimated when the source gives no clear info. The panel always tells you when.
 - **Discogs is a secondary source** for Rym: always check the data against your copy.
@@ -90,7 +89,7 @@ Checkboxes in the panel (they only prepare the data: press **Fill form** to appl
 
 ## Privacy
 
-The script only reads the release from the Discogs API or from the Bandcamp page. The data and your settings are saved in Tampermonkey on your computer, and only used to fill in the Rym form. Nothing is sent anywhere else.
+The script only reads the release from the Discogs API or from the Bandcamp page. The data is saved in Tampermonkey on your computer, and only used to fill in the Rym form. Nothing is sent anywhere else.
 
 ## Feedback
 
