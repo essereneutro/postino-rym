@@ -16,7 +16,7 @@ It never submits anything by itself: you check the form, press Preview and submi
 - **Catalog number** (`n/a` when there is no label or no number, as Rym asks). Amazon codes, label codes (LC), SPARS codes and barcodes are dropped.
 - **Country**, with the official Rym names (Russia → Russian Federation, Czech Republic → Czechia…). No country for digital releases.
 - **Issue attributes**: colored vinyl, 180 gram, 33 rpm, gatefold, digipak, limited, numbered, remastered, box set, bonus DVD, USB, no artwork…
-- **Performance attributes**: live, remixes, instrumental, demo recordings, promotional demo, archival, soundtrack, songs "inspired by", Creative Commons, AI-generated (only when stated)… (Rym thresholds: more than 50% of the tracks)
+- **Performance attributes**: live, remixes, instrumental, demo recordings, promotional demo, archival, soundtrack, songs "inspired by", Creative Commons, AI-generated (only when stated)… (Rym thresholds: more than 50% of the tracks; when only the title or the notes say "live", the panel asks you to check)
 - **Recording date**, from the "Recorded…" notes or from the date in the title of a live release (primary issue only).
 - **Tracklist**:
   - Rym positions (`CD.1` → `1`, `1-1` → `1.1`, `AA` → `B`, `A01` → `A1`); parallel grooves are left as they are
@@ -72,9 +72,10 @@ An Italian version is also available: [`postino.it.user.js`](postino.it.user.js)
 5. Press **Fill form**.
 6. Read the **To do** list, use the buttons you need, check everything, then press **Preview** and submit.
 
-Checkboxes in the panel:
+Checkboxes in the panel (they only prepare the data: press **Fill form** to apply them):
 
 - **English capitalization**: untick it for non-English titles (first letter only).
+- **Keep source capitalization**: leaves names and titles as on Discogs or Bandcamp, for the official stylings the Rym wiki allows (explain why in the sources).
 - **Import track times** (vinyl only): Rym wants track times on vinyl only if they are printed on the record. Hidden when the Discogs notes say they are not printed.
 - **I own a copy**: adds "I own this release" to the sources. It stays saved.
 
