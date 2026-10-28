@@ -32,13 +32,12 @@ It never submits anything by itself: you check the form, press Preview and submi
 
 ## What it suggests
 
-Uncertain choices are never applied by themselves: they appear as buttons under the **To do** list, and you click only the ones you agree with.
+Uncertain choices are never applied by themselves: they appear as buttons under the short **To do** list, and you click only the ones you agree with. Routine notes stay in **Details**, closed by default.
 
 - **Credit lines** with the official Rym roles (`Mastered By` → `mastering engineer`, `Vocals [Backing]` → `backing vocals`) and tracks (`A1 to B3` → `A1-A6, B1-B3`), featured and guest included. Press 🔍 on a line to search the artist: when you click the result, the line becomes linked.
 - **Credited name** with "featuring" / "with" or a name variation.
 - **Edition name** (for example `30th Anniversary Edition`), only for secondary issues.
 - **Languages** of the lyrics, estimated from the titles.
-- **Colour variant** in the title (`[red marbled vinyl]`), only if several colours of the same issue exist.
 - **Country** from the rights society when Discogs says "Europe" (SIAE → Italy, GEMA → Germany…).
 - **Packaging** mentioned only in the Discogs notes (gatefold, digipak…).
 - **Composers** for classical releases and soundtracks; performers in the Rym order for classical (orchestra, choir, conductor, soloists).
