@@ -1642,21 +1642,6 @@
     }, 1000);
   }
 
-  // variante di colore per il titolo: "[red marble vinyl]" in minuscolo (wiki §8.7)
-  function colorBrag(fmt) {
-    const vinyl = fmt === 95 || fmt === 96, tape = fmt === 66;
-    if (!vinyl && !tape) return '';
-    if (tape && !(D.descriptions || []).includes('Limited Edition')) return '';
-    const texts = vinyl && (D.vinylTexts || []).length ? D.vinylTexts : (D.formatTexts || []);
-    const NOT = tape ? /\b(labels?|insert|j-?card|sleeve|box|case|print(ed)?|booklet)\b/i : NOT_VINYL;
-    const part = texts.join(',').split(/[,;+]|\bwith\b/i).map((p) => p.trim()).find((p) => COLOR_WORDS.test(p) && !NOT.test(p));
-    if (!part) return '';
-    const c = part.toLowerCase()
-      .replace(/\b\d{1,2}\s*("|''|”|-?inch(es)?)/g, '').replace(/\b(limited|ltd|numbered)\b.*$/, '').replace(/\b\d{2,3}\s*-?\s*(g|gr|grams?)\b/g, '')
-      .replace(/\s*\b(vinyl|cassette|tape|shell|lp|edition|pressing)\b\s*$/g, '').replace(/\s{2,}/g, ' ').trim();
-    return c ? '[' + c + (vinyl ? ' vinyl' : ' cassette') + ']' : '';
-  }
-
   // Edition name: solo nomi veri ("30th Anniversary Edition"), non attributi ("Limited Edition")
   const BAD_EDITION = /^(limited|special|numbered|deluxe|super deluxe|standard|first|1st|reissue|re-issue|colou?red|vinyl|promo|digital|collector'?s|remastered|clean|explicit|censored)\s+edition$/i;
   function findEdition(title, texts) {
@@ -1968,7 +1953,7 @@
       // compositori ("File under composer"): solo chi ha scritto almeno il 25% della release
       const comps = [...new Set((D.creditList || []).filter((c) => /composed by|^composer|written-by|music by/i.test(c.role)).map((c) => c.name))];
       if (comps.length) {
-        todo.push(say('Compositori in "File under composer" (almeno 25% della release): ', 'Composers in "File under composer" (at least 25% of the release): ') + comps.slice(0, 4).join(', '));
+        warn.push(say('Compositori in "File under composer" (almeno 25% della release): ', 'Composers in "File under composer" (at least 25% of the release): ') + comps.slice(0, 4).join(', '));
         comps.slice(0, 6).forEach((c) => act(say('Cerca compositore: ', 'Search composer: ') + c, () => searchComposer(c), '#2a6fdb'));
       }
       // titolo: i nomi degli interpreti staccati dal titolo vanno tolti
@@ -2009,7 +1994,7 @@
       if (!filedAlready && names.length) {
         searchPerformer(names[0]);
         warn.push(say('Artista non impostato: scegli "', 'Artist not set: pick "') + names[0] + say('" dai risultati a destra (1.3a).', '" from the results on the right (1.3a).'));
-        todo.push(say('Scegli l\'artista "', 'Pick the artist "') + names[0] + say('" a destra (1.3a)', '" on the right (1.3a)') + (names.length > 1 ? say(', poi: ', ', then: ') + names.slice(1).join(', ') : ''));
+        warn.push(say('Scegli l\'artista "', 'Pick the artist "') + names[0] + say('" a destra (1.3a)', '" on the right (1.3a)') + (names.length > 1 ? say(', poi: ', ', then: ') + names.slice(1).join(', ') : ''));
       }
       names.slice(filedAlready ? 0 : 1).forEach((n) => act(say('Cerca: ', 'Search: ') + n, () => searchPerformer(n), '#2a6fdb'));
       // 1.4 nome accreditato: con "feat."/"with" o una variante del nome (ANV)
@@ -2017,7 +2002,7 @@
       if (RM.featured.length || RM.guests.length || anvDiff) {
         const credited = creditedString();
         act(say('Nome accreditato: ', 'Credited name: ') + credited, () => setCreditedName(credited), '#8e44ad');
-        todo.push(say('Nome accreditato diverso dal default (feat./with o variante del nome): pulsante sotto', 'Credited name differs from the default (feat./with or a name variation): button below'));
+        warn.push(say('Nome accreditato diverso dal default (feat./with o variante del nome): pulsante sotto', 'Credited name differs from the default (feat./with or a name variation): button below'));
       }
       if (RM.featured.length || RM.guests.length) warn.push(say('"feat."/"with" nell\'artista: niente file under per ', '"feat."/"with" in the artist: no file under for ') + RM.featured.concat(RM.guests).join(', ') + say(', solo crediti featured/guest.', ', only featured/guest credits.'));
     }
@@ -2064,7 +2049,6 @@
       suggested = singleTitle(T.tracks);
       if (suggested && suggested.toLowerCase() !== (T.title || '').toLowerCase()) {
         warn.push('Titolo standard Rym per il singolo: "' + suggested + '" (usa il pulsante sotto per applicarlo).');
-        todo.push('Titolo Rym per il singolo: "' + suggested + '" (pulsante sotto)');
       } else suggested = '';
     }
 
@@ -2082,7 +2066,7 @@
       }
     }
     if (setSelect('year', year)) { const dd = [year, D.month, D.day].filter(Boolean).join('-'); log.push(say('Data: ', 'Date: ') + dd); sum.push(dd); }
-    else { warn.push(say('Anno non impostato.', 'Year not set.')); todo.push(say('Data mancante', 'Date missing')); }
+    else { warn.push(say('Anno non impostato.', 'Year not set.')); if (!(digital && D.year) && !(SRC === 'Bandcamp' && D.pubDate && (D.oldDate || D.lateUpload))) todo.push(say('Data mancante', 'Date missing')); }
     if (year) { setSelect('month', D.month); setSelect('day', D.day); }
     // Discogs a volte usa l'anno del © come data: Rym non lo accetta (wiki "Add release information" §6)
     const cYears = [...(D.notes || '').matchAll(/[©℗]\s*(?:copyright\s*)?((?:19|20)\d\d)/gi)].map((m) => m[1]);
@@ -2092,8 +2076,8 @@
       const setDate = (iso) => { const [y, m, d] = iso.split('-'); setSelect('year', y); setSelect('month', m); setSelect('day', d); };
       act(say('Usa la data di pubblicazione ', 'Use the publish date ') + D.pubDate, () => setDate(D.pubDate), '#2a6fdb');
       if (D.relDate && !D.oldDate) act(say('Usa la data di uscita ', 'Use the release date ') + D.relDate, () => setDate(D.relDate), '#555');
-      todo.push(say('Bandcamp: uscita ', 'Bandcamp: released ') + (D.relDate || D.oldDate) + say(', pubblicata ', ', published ') + D.pubDate +
-        say('. Se è una ristampa digitale di un disco più vecchio, la data dell\'issue digitale è quando è comparsa in digitale.', '. If it is a digital reissue of an older record, the digital issue date is when it first appeared digitally.'));
+      if (!D.oldDate) todo.push(say('Bandcamp: uscita ', 'Bandcamp: released ') + (D.relDate || D.oldDate) + say(', pubblicata ', ', published ') + D.pubDate + say(': scegli la data (pulsanti sotto)', ': pick the date (buttons below)'));
+      warn.push(say('Se è una ristampa digitale di un disco più vecchio, la data dell\'issue digitale è quando è comparsa in digitale.', 'If it is a digital reissue of an older record, the digital issue date is when it first appeared digitally.'));
     }
     if (D.preorder) warn.push(say('Pre-order: su Rym le uscite future vanno solo se annunciate con titolo e data (anno in corso o prossimo).', 'Pre-order: on Rym upcoming releases are allowed only when announced with title and date (this year or next).'));
     if (D.partOfAlbum) { warn.push(say('Questa traccia fa parte di un album: non è un singolo a sé, salvo che sia uscita anche come singolo.', 'This track belongs to an album: it is not a standalone single, unless it was also released as a single.')); todo.push(say('Traccia di un album: verifica che esista come singolo', 'Track from an album: check it exists as a single')); }
@@ -2160,7 +2144,7 @@
     if (setVal($('#catalog_no'), catno)) { log.push('Catalogo: ' + catno); sum.push('cat. ' + catno); }
     // V/A: il classifier di etichetta ([LabelXXXX]) è obbligatorio: si compila appena scegli l'etichetta
     if (radioVal('category') === 'va') {
-      todo.push(say('V/A: dopo aver scelto l\'etichetta, il campo "Label(s)" dei classifier si compila da solo', 'V/A: after you pick the label, the classifiers "Label(s)" field fills in by itself'));
+      warn.push(say('V/A: dopo aver scelto l\'etichetta, il campo "Label(s)" dei classifier si compila da solo', 'V/A: after you pick the label, the classifiers "Label(s)" field fills in by itself'));
       watchVaLabel();
       if ((D.series || []).length) todo.push(say('Serie su Discogs: ', 'Series on Discogs: ') + D.series.join(', ') + say(' → cerca il classifier ([DescriptorXXXX]) con "open list"', ' → look up the classifier ([DescriptorXXXX]) with "open list"'));
       const trib = (D.title || '').match(/\btribute to\s+(.+?)\s*$/i);
@@ -2174,23 +2158,20 @@
     const suggestions = suggested ? [suggested] : [];
     const firstTrack = (T.tracks.find((t) => !t.header) || {});
     if (/^\[?(untitled|s\/t|self[\s-]?titled)\]?$/i.test((D.title || '').trim()) && G.type !== 'i') {
-      if (D.artist && !D.various) suggestions.push(RM.mode === 'split' ? RM.fileUnder.join(' / ') : D.artist);
       // EP di 4 tracce senza titolo: titolo dalla costa, se no la traccia in evidenza, se no la A1 (wiki "Release types" §2.1)
-      if (G.type === 'e' && T.tracks.filter((t) => !t.header).length === 4 && firstTrack.title) suggestions.push(firstTrack.plain || firstTrack.title);
-      if (catno && catno !== 'n/a') suggestions.push(catno);
-      if (suggestions.length) todo.push('Release senza titolo: per la wiki Rym è self-titled (nome dell\'artista); scegli sotto');
+      const ep4 = G.type === 'e' && T.tracks.filter((t) => !t.header).length === 4 && firstTrack.title;
+      const n0 = suggestions.length;
+      if (ep4) suggestions.push(firstTrack.plain || firstTrack.title);
+      else if (D.artist && !D.various) suggestions.push(RM.mode === 'split' ? RM.fileUnder.join(' / ') : D.artist);
+      else if (catno && catno !== 'n/a') suggestions.push(catno);
+      if (suggestions.length > n0) warn.push(ep4 ? say('EP senza titolo: titolo dalla costa, se no la traccia in evidenza, se no la prima (pulsante sotto)', 'Untitled EP: title from the spine, else the highlighted track, else the first one (button below)')
+        : say('Release senza titolo: per la wiki Rym è self-titled (pulsante sotto)', 'Untitled release: per the Rym wiki it is self-titled (button below)'));
     }
 
     // split senza titolo vero: il titolo è l'elenco degli artisti come nel nome (wiki §8.5)
     if (RM.mode === 'split' && G.type !== 'i' && / \/ /.test(D.title || '') && RM.fileUnder.length) {
       suggestions.push(RM.fileUnder.join(' / '));
-      todo.push(say('Split: se la release non ha un titolo vero, il titolo è l\'elenco degli artisti (pulsante sotto)', 'Split: if the release has no real title, the title is the list of artists (button below)'));
-    }
-    // varianti di colore: "[blue marble vinyl]" in minuscolo nel titolo, solo se esistono più colori della stessa issue
-    const brag = colorBrag(fmt);
-    if (brag) {
-      suggestions.push(T.title + ' ' + brag);
-      todo.push(say('Più colori della stessa issue? Allora aggiungi ', 'Several colours of the same issue? Then add ') + brag + say(' al titolo (pulsante sotto)', ' to the title (button below)'));
+      warn.push(say('Split: se la release non ha un titolo vero, il titolo è l\'elenco degli artisti (pulsante sotto)', 'Split: if the release has no real title, the title is the list of artists (button below)'));
     }
     // Edition name: solo testo stampato sulla release, solo per le issue secondarie (wiki §9)
     const ed = findEdition(T.title, D.formatTexts || []);
@@ -2199,7 +2180,7 @@
         setVal($('#addendum'), ed.name); touched.fields.add('addendum');
         if (ed.inTitle) setVal($('#title'), ed.cutTitle);
       }, '#8e44ad');
-      todo.push(say('Edition name «', 'Edition name «') + ed.name + say('»: solo se stampato sulla release, e solo per un\'issue secondaria (pulsante sotto)', '»: only if printed on the release, and only for a secondary issue (button below)'));
+      warn.push(say('Edition name «', 'Edition name «') + ed.name + say('»: solo se stampato sulla release, e solo per un\'issue secondaria (pulsante sotto)', '»: only if printed on the release, and only for a secondary issue (button below)'));
     }
     // 3.5 Paesi (vuoto = mondiale; per il digitale Rym non vuole il paese)
     if (D.country && !digital) {
@@ -2275,7 +2256,7 @@
     if (perf.length) log.push('Performance: ' + perf.join(', '));
     warn.push(...P.warn);
     if (P.liveHint) {
-      todo.push(say('Live? Lo dicono ', 'Live? The ') + P.liveHint + say(', ma non più del 50% delle tracce: spuntalo solo se registrato davanti a un pubblico vero', ' say so, but not more than 50% of the tracks: tick it only if recorded in front of a real audience'));
+      todo.push(say('Live? Indizio: ', 'Live? Hint: ') + P.liveHint + say('. Spuntalo solo se registrato davanti a un pubblico (pulsante sotto)', '. Tick it only if recorded in front of an audience (button below)'));
       act(say('Spunta Live', 'Tick Live'), () => { if (check('attrib5')) attrs.set(5, 'Live'); }, '#555');
     }
     // remix non autorizzati: file under ai remixer, l'artista originale solo nei crediti in testo semplice (wiki "Digital releases" §5)
@@ -2284,7 +2265,7 @@
     if (!D.classical && P.attrs.some((a) => [53, 54, 55, 56].includes(a[0]))) {
       const comps = [...new Set((D.creditList || []).filter((c) => /composed by|^composer|^score|music by/i.test(c.role)).map((c) => c.name))];
       if (comps.length) {
-        todo.push(say('Colonna sonora: file under ai compositori con almeno il 25% della release: ', 'Soundtrack: file under the composers with at least 25% of the release: ') + comps.slice(0, 4).join(', '));
+        warn.push(say('Colonna sonora: file under ai compositori con almeno il 25% della release: ', 'Soundtrack: file under the composers with at least 25% of the release: ') + comps.slice(0, 4).join(', '));
         comps.slice(0, 5).forEach((c) => act(say('Cerca compositore: ', 'Search composer: ') + c, () => searchPerformer(c), '#2a6fdb'));
       }
     }
@@ -2303,7 +2284,7 @@
     const langs = lyricLanguages(T);
     if (langs.length && primary) {
       act(say('Lingue: ', 'Languages: ') + langs.join(', '), () => { setVal($('#languages'), langs.join(', ')); touched.fields.add('languages'); }, '#2a6fdb');
-      todo.push(say('Lingue stimate dai titoli: ', 'Languages estimated from the titles: ') + langs.join(', ') + say(' (solo se i testi sono davvero in queste lingue)', ' (only if the lyrics really are in them)'));
+      warn.push(say('Lingue stimate dai titoli: ', 'Languages estimated from the titles: ') + langs.join(', ') + say(' (solo se i testi sono davvero in queste lingue)', ' (only if the lyrics really are in them)'));
     }
     const flagWarn = T.warn.find((w) => w.startsWith('Maiuscole: controlla'));
     if (flagWarn) todo.push('Maiuscole da verificare: ' + flagWarn.replace(/^Maiuscole: controlla (.*?): minuscolo.*$/, '$1'));
@@ -2345,13 +2326,11 @@
     }
     if ((D.featured || []).length) {
       warn.push('Featured su Discogs: ' + D.featured.join(', ') + '.');
-      todo.push('Featured da aggiungere nei crediti: ' + D.featured.slice(0, 4).join(', ') + (D.featured.length > 4 ? ' e altri' : ''));
     }
     // crediti: righe pronte (testo semplice) da collegare con la ricerca, featured/guest/remixer compresi
     const lines = creditLines(T);
     if (lines.length) {
-      act(say('Aggiungi ', 'Add ') + lines.length + (lines.length === 1 ? say(' riga di crediti', ' credit line') : say(' righe di crediti', ' credit lines')), () => addCreditLines(lines), '#27ae60');
-      todo.push(say('Crediti pronti (pulsante sotto): poi collega gli artisti con 🔍', 'Credits ready (button below): then link the artists with 🔍'));
+      act(say('Aggiungi ', 'Add ') + lines.length + (lines.length === 1 ? say(' riga di crediti', ' credit line') : say(' righe di crediti', ' credit lines')) + say(' (poi collega con 🔍)', ' (then link with 🔍)'), () => addCreditLines(lines), '#27ae60');
       if (unknownRoles.size) todo.push(say('Ruoli non trovati nella lista Rym, correggili: ', 'Roles not found in the Rym list, fix them: ') + [...unknownRoles].join(', '));
       if (!primary) warn.push(say('Issue secondaria: aggiungi solo i crediti che non sono già sulla primary (es. bonus track, featured, remixer).', 'Secondary issue: add only the credits not already on the primary (e.g. bonus tracks, featured, remixers).'));
     }
@@ -2361,7 +2340,9 @@
     filledRaw = rawSeen;
     settingsChanged = false;
     renderPanel();
-    suggestions.forEach((x) => actions.unshift({ title: x }));
+    // un solo titolo proposto, per non creare confusione
+    const best = suggestions.find((x) => x && x.toLowerCase() !== (T.title || '').toLowerCase());
+    if (best) actions.unshift({ title: best });
     report({ sum, spunte: [...attrs.values()], todo, details: log.concat(warn) }, actions);
   }
 
@@ -2462,7 +2443,8 @@
     lastReport = [R, actions];
     const out = panel.querySelector('#drym_out');
     out.innerHTML =
-      '<div style="color:#7dda8a;font-size:12px">✔ ' + esc(R.sum.join(' · ')) + (R.spunte.length ? ' · ' + esc(say('spunte: ', 'ticked: ') + R.spunte.join(', ')) : '') + '</div>' +
+      // i dati compilati sono già nell'intestazione: qui solo le spunte
+      '<div style="color:#7dda8a;font-size:12px">✔ ' + say('Compilato', 'Filled') + (R.spunte.length ? ' · ' + esc(R.spunte.join(', ')) : '') + '</div>' +
       (R.todo.length ? '<div style="color:#f5c26b;margin-top:6px;font-size:13px"><b>' + say('Da fare', 'To do') + '</b><br>• ' + R.todo.map(esc).join('<br>• ') + '</div>' : '') +
       '<details style="margin-top:6px;opacity:.8;font-size:12px"><summary style="cursor:pointer">Dettagli</summary>' +
       R.details.map((d) => '<div>' + esc(d) + '</div>').join('') + '</details>';
