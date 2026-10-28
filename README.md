@@ -1,4 +1,4 @@
-# Postino for Rateyourmusic
+# Postino 1.0a for Rateyourmusic
 
 **Postino** is a userscript that takes a release from **Discogs** or **Bandcamp** and fills in the **Rateyourmusic "Add Release" form** for you, following the Rym wiki.
 
