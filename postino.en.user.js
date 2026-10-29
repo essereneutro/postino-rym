@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Postino
 // @namespace    postino-rym-en
-// @version      1.0a
+// @version      1.0b
 // @description  Brings the data of a Discogs or Bandcamp release into the Rateyourmusic "Add Release" form, following the Rym rules. It never submits anything: preview and submit stay with you.
 // @match        https://www.discogs.com/*
 // @match        https://*.bandcamp.com/*
@@ -18,7 +18,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-// Postino 1.0a — Discogs / Bandcamp → Rateyourmusic
+// Postino 1.0b — Discogs / Bandcamp → Rateyourmusic
 // How to use: on a Discogs release or a Bandcamp album press "→ Rym" (bottom right);
 // then, on the Rym "Add release" page, press "Fill form" in the panel and check the "To do" items.
 
@@ -795,7 +795,9 @@
   // always capitalize the first and last word of each section (after : ? ! — ( " and " / ").
   // Other Latin languages: only the first word and proper names -> cannot be fixed automatically.
   const LOWER_WORDS = new Set(['a', 'an', 'the', 'and', 'but', 'or', 'nor', 'for', 'yet', 'so', 'as', 'at', 'by', 'in', 'of', 'on', 'to',
-    'versus', 'vs', 'vs.', 'v.', 'etc', 'etc.', "o'", "'n'", "n'", "'n"]);
+    'versus', 'vs', 'vs.', 'v.', 'etc', 'etc.', "o'", "'n'", "n'", "'n",
+    // slang (wiki §3.4): follows the word it stands for (da/tha = the, an' = and, fo' = for, ta = to)
+    'da', 'tha', "an'", "fo'", 'ta']);
   const NEVER_FORCE = new Set(['versus', 'vs', 'vs.', 'v.', 'etc', 'etc.', "o'", "'n'", "n'", "'n"]); // lowercase even when last ("Time After Time etc.")
   const AMBIGUOUS = new Set(['as', 'by', 'in', 'on', 'to', 'but', 'so']); // can be adverbs -> capitalized
   const ACRONYMS = new Set(['DJ', 'MC', 'TV', 'USA', 'UK', 'NYC', 'NY', 'OK', 'EP', 'LP', 'CD', 'DVD', 'BBC', 'MTV', 'VIP', 'UFO', 'USSR', 'R&B', 'BPM', 'SOS', 'ASAP', 'FM', 'DC', 'AI', 'EU', 'UN']);
@@ -895,6 +897,25 @@
     const low = p.toLowerCase();
     return isFirst ? capFirst(low, 'lower') : low;
   }
+  // recognisable proper names (Italian titles): regions, cities, countries, common first names; ambiguous words left out (Prato, Rosa, Marina, Pace…)
+  const PROPER = {
+    it: 'Abruzzo|Basilicata|Calabria|Campania|Emilia|Romagna|Emilia-Romagna|Friuli|Venezia Giulia|Friuli Venezia Giulia|Lazio|Liguria|Lombardia|Molise|Piemonte|Puglia|Sardegna|Sicilia|Toscana|Trentino|Alto Adige|Umbria|Valle d\'Aosta|Veneto|Salento|Irpinia|Cilento|Brianza|Maremma|Langhe|Barbagia|Gallura|Ciociaria|Lucania|Carnia|Italia|Europa|Africa|America|Asia|Oceania|Australia|Francia|Spagna|Germania|Inghilterra|Grecia|Turchia|Russia|Cina|Giappone|India|Brasile|Argentina|Messico|Cuba|Egitto|Marocco|Tunisia|Algeria|Libia|Albania|Portogallo|Svizzera|Austria|Belgio|Olanda|Irlanda|Scozia|Svezia|Norvegia|Finlandia|Danimarca|Islanda|Polonia|Ungheria|Romania|Bulgaria|Jugoslavia|Serbia|Croazia|Slovenia|Bosnia|Palestina|Israele|Libano|Siria|Iran|Iraq|Afghanistan|Vietnam|Corea|Cile|Bolivia|Venezuela|Colombia|Canada|Etiopia|Eritrea|Somalia|Nigeria|Senegal|Congo|Sudafrica|Kenya|Angola|Mozambico|Parigi|Londra|Berlino|Madrid|Lisbona|Vienna|Mosca|Atene|Praga|Varsavia|Budapest|Bruxelles|Amsterdam|Dublino|Stoccolma|Oslo|Copenaghen|Helsinki|Istanbul|Gerusalemme|Beirut|Damasco|Baghdad|Teheran|Cairo|Tunisi|Algeri|Pechino|Tokyo|Belgrado|Zagabria|Tirana|Bucarest|Kiev|Avana|Sarajevo|Abruzzi|Agrigento|Alessandria|Ancona|Aosta|Arezzo|Ascoli Piceno|Asti|Avellino|Bari|Barletta|Belluno|Benevento|Bergamo|Biella|Bologna|Bolzano|Brescia|Brindisi|Cagliari|Caltanissetta|Campobasso|Caserta|Catania|Catanzaro|Chieti|Como|Cosenza|Cremona|Crotone|Cuneo|Enna|Ferrara|Firenze|Foggia|Forlì|Frosinone|Genova|Gorizia|Grosseto|Imperia|Isernia|La Spezia|Lecce|Lecco|Livorno|Lucca|Macerata|Mantova|Matera|Messina|Milano|Modena|Monza|Napoli|Novara|Nuoro|Oristano|Padova|Palermo|Parma|Pavia|Perugia|Pesaro|Pescara|Piacenza|Pisa|Pistoia|Pordenone|Ragusa|Ravenna|Reggio Calabria|Reggio Emilia|Rieti|Rimini|Roma|Rovigo|Salerno|Sassari|Savona|Siena|Siracusa|Sondrio|Taranto|Teramo|Terni|Torino|Trapani|Trento|Treviso|Trieste|Udine|Varese|Venezia|Verbania|Vercelli|Verona|Vibo Valentia|Vicenza|Viterbo|Urbino|Cesena|Andria|Trani|Amalfi|Positano|Sorrento|Capri|Ischia|Procida|Lampedusa|Pantelleria|Taormina|Gela|Marsala|Caltagirone|Tevere|Arno|Adige|Piave|Etna|Vesuvio|Alpi|Appennini|Dolomiti|Gesù|Cristo|Madonna|Natale|Pasqua|Ferragosto|Giovanni|Giuseppe|Antonio|Mario|Luigi|Francesco|Angelo|Vincenzo|Pietro|Salvatore|Carlo|Franco|Domenico|Bruno|Paolo|Michele|Giorgio|Aldo|Sergio|Luciano|Roberto|Marco|Andrea|Stefano|Luca|Alessandro|Massimo|Davide|Matteo|Lorenzo|Nicola|Enrico|Alberto|Fabrizio|Claudio|Maurizio|Giacomo|Riccardo|Simone|Filippo|Emilio|Tommaso|Gianni|Peppino|Totò|Nino|Rocco|Gino|Pino|Beppe|Mimmo|Tonino|Carmine|Gennaro|Ciro|Raffaele|Gaetano|Pasquale|Sandro|Renato|Ugo|Guido|Dario|Fabio|Piero|Gigi|Lucio|Federico|Leonardo|Ettore|Achille|Umberto|Vittorio|Corrado|Arturo|Ernesto|Giuliano|Rino|Turi|Saro|Maria|Anna|Giuseppina|Angela|Giovanna|Teresa|Lucia|Carmela|Caterina|Francesca|Antonietta|Carla|Elena|Concetta|Rita|Franca|Paola|Laura|Giulia|Sara|Chiara|Martina|Valentina|Silvia|Elisa|Federica|Alessandra|Barbara|Cristina|Monica|Daniela|Roberta|Patrizia|Simona|Emma|Sofia|Alice|Beatrice|Nina|Lina|Mimì|Marisa|Luisa|Graziella|Giorgia|Ornella|Gina|Lisa|Carmen|Rosalia|Agata|Assunta|Nannina|Marianna|Giulietta|Romeo|Pinocchio|Garibaldi|Mazzini|Dante|Petrarca|Leopardi|Manzoni|Verdi|Puccini|Rossini'.split('|'),
+    all: 'New York|Los Angeles|San Francisco|Buenos Aires|Rio de Janeiro|Hong Kong|Tel Aviv|Las Vegas|New Orleans'.split('|')
+  };
+  const PROPER_RE = {};
+  function properNouns(text, lang) {
+    // Italian list for Italian titles, or "non-English" ones on an Italian record
+    const key = lang === 'it' || (!['es', 'pt', 'fr', 'nl', 'tr', 'id', 'tl', 'ru'].includes(lang) && /\bItaly\b/.test(D.country || '')) ? 'it' : 'all';
+    if (!PROPER_RE[key]) {
+      const list = (key === 'it' ? PROPER.it.concat(PROPER.all) : PROPER.all).sort((a, b) => b.length - a.length);
+      PROPER_RE[key] = { re: new RegExp('(^|[^\\p{L}])(' + list.map(escRe).join('|') + ')(?=$|[^\\p{L}])', 'giu'), map: new Map(list.map((n) => [n.toLowerCase(), n])) };
+    }
+    const P = PROPER_RE[key];
+    text = text.replace(P.re, (all, pre, name) => pre + (P.map.get(name.toLowerCase()) || name));
+    // saints: "santa chiara" -> "Santa Chiara" when the name is recognised
+    if (key === 'it') text = text.replace(/(^|[^\p{L}])(san|santa|santo|santi|sant['’])(\s*)(?=\p{Lu})/gu, (all, pre, s, sp) => pre + s.charAt(0).toUpperCase() + s.slice(1) + sp);
+    return text;
+  }
   function capSentence(str, protect, lang) {
     const src = str || '';
     const letters = src.replace(/[^\p{L}]/gu, '');
@@ -913,6 +934,7 @@
         return m[1] + out + m[3];
       }).join('');
     }).join('');
+    text = properNouns(text, lang);
     (protect || []).forEach((name) => {
       if (!name || name.length < 3 || isVarious(name)) return;
       const re = new RegExp('(^|[^\\p{L}])(' + escRe(name) + ')(?=$|[^\\p{L}])', 'giu');
@@ -1022,6 +1044,15 @@
     const discRe = /^(?:disc|disk)?\s*(\d+)\s*[-–.]\s*0*(\d+)([a-z]?)$/i;
     const sideRe = /^([A-Z])(\1*)\s*0*(\d*)((?:[a-z]|\.\d+|\.[a-z])?)$/; // "A", "AA2", "A01", "A1a"
 
+    // 0) roman numerals as positions ("i", "ii", "IV") on CDs and formats without sides -> 1, 2, 4
+    const romanVal = (r) => { const v = { i: 1, v: 5, x: 10, l: 50 }; let n = 0; const a = r.toLowerCase(); for (let k = 0; k < a.length; k++) { const c = v[a[k]], d = v[a[k + 1]] || 0; n += c < d ? -c : c; } return n; };
+    const posList = tracks.map((t) => (t.pos || '').trim().replace(/\.$/, '')).filter(Boolean);
+    const allRoman = posList.length >= 2 && posList.every((p) => /^(x{0,3}(ix|iv|v?i{0,3})|X{0,3}(IX|IV|V?I{0,3}))$/.test(p) && p);
+    const sided = isVinyl() || /cassette/i.test(D.formatName || '');
+    if (allRoman && (!sided || posList.some((p) => /^[ivx]+$/.test(p) || p.length > 1 && !/^(.)\1*$/.test(p)))) {
+      tracks.forEach((t) => { const p = (t.pos || '').trim().replace(/\.$/, ''); if (p) t.pos = String(romanVal(p)); });
+    }
+
     // 1) trailing dot and media prefix
     tracks.forEach((t) => {
       let p = (t.pos || '').trim().replace(/\.$/, '');
@@ -1123,7 +1154,9 @@
     let liveHint = '';
     const share = (re) => (n ? tracks.filter((t) => re.test(t.title)).length / n : 0);
     const pct = (x) => Math.round(x * 100) + '% of tracks';
-    const focal = n ? tracks[0].title : ''; // singles: the focal track (the first one) is what counts
+    // singles: the focal track counts, i.e. the one named like the release (else the first one)
+    const baseT = (x) => (x || '').replace(/(\s*[(\[][^)\]]*[)\]])+\s*$/, '').trim().toLowerCase();
+    const focal = n ? (tracks.find((t) => baseT(t.plain || t.title) === baseT(title)) || tracks[0]).title : '';
     const isSingle = type === 'i';
 
     // "Additional release" content
@@ -1153,7 +1186,25 @@
     }
 
     // Remixes: singles -> only if the focal track is a remix
-    const remixShare = isSingle ? (PERF.remix.test(focal) ? 1 : 0) : share(PERF.remix);
+    // remix: words in the title, "(Name Mix)", Remix credits on the tracks, release title "… Remixes"
+    const NOT_REMIX = /^(original|radio|extended|album|single|club|main|instrumental|vocal|short|full|long|edit|clean|explicit|stereo|mono|7"?|12"?|lp)\b/i;
+    const namedMix = (x) => [...(x || '').matchAll(/[(\[]([^()\[\]]+?)\s+mix[)\]]/gi)].some((m) => !NOT_REMIX.test(m[1].trim()));
+    const isRemix = (t) => PERF.remix.test(t.title) || namedMix(t.title);
+    const rc = (D.creditList || []).filter((c) => /\bremix/i.test(c.role || ''));
+    const byCredit = new Set();
+    rc.forEach((c) => {
+      if (!c.tracks) { tracks.forEach((t) => byCredit.add(t)); return; }
+      const key = (p) => String(p || '').trim().toUpperCase().replace(/\.$/, '');
+      const idx = (p) => tracks.findIndex((t) => key(t.orig || t.pos) === key(p));
+      c.tracks.split(/\s*,\s*/).forEach((part) => {
+        const r = part.split(/\s+to\s+/i), a = idx(r[0]), b = r.length > 1 ? idx(r[1]) : a;
+        if (a >= 0 && b >= 0) for (let i = Math.min(a, b); i <= Math.max(a, b); i++) byCredit.add(tracks[i]);
+      });
+    });
+    const remixed = (t) => isRemix(t) || byCredit.has(t);
+    const focalT = n ? (tracks.find((t) => t.title === focal) || tracks[0]) : null;
+    let remixShare = isSingle ? (focalT && remixed(focalT) ? 1 : 0) : (n ? tracks.filter(remixed).length / n : 0);
+    if (/\b(the\s+)?remix(es|ed)\b|\bremix\s+ep\b|\brmxs\b/i.test(title)) remixShare = 1;
     if (remixShare > 0.5) out.push([24, 'Remixes', isSingle ? 'focal track is a remix' : pct(remixShare)]);
 
     // Selector Comp: unmixed V/A compilation with a credited compiler
@@ -1237,8 +1288,8 @@
     if (!C.auto) return C.english ? { m: 'en' } : { m: 'sent', lang: C.lang };
     let lt = detectLang(str, true);
     if (lt === 'unknown') lt = C.lang;
-    // weak "English" hint on a Turkish/Indonesian/Filipino record: the record language wins
-    if (lt === 'en' && TITLE_LANGS[C.lang] && detectLangStrong(str) === 'unknown') lt = C.lang;
+    // weak hints in the title: the record language wins, so titles of the same record follow the same rules
+    if (C.lang && !['unknown', 'xx'].includes(C.lang) && detectLangStrong(str) === 'unknown') lt = C.lang;
     // "non-English" title without a precise language: the record language applies (French, Dutch…)
     if (lt === 'xx' && C.lang && !['en', 'unknown', 'xx'].includes(C.lang)) lt = C.lang;
     if (TITLE_LANGS[lt]) return { m: 'title', lang: lt };
@@ -1431,7 +1482,10 @@
     const mediaRows = res.tracks.filter((t) => t.mediaRow).map((t) => t.title);
     if (mediaRows.length) res.log.push('Media lines (no number): ' + mediaRows.join(', '));
     const C = capsState();
-    const protect = [D.artist, D.artistSearch].filter(Boolean);
+    // names to protect: the artist and, if made of several words, names found in the credits and in the track artists
+    const multi = (n) => /\S\s+\S/.test(n || '');
+    const protect = [...new Set([D.artist, D.artistSearch].concat((D.artistsList || []).map((a) => a.name), (D.creditList || []).map((c) => c.name).filter(multi),
+      (D.tracks || []).flatMap((t) => t.artists || []).map(clean).filter(multi)).filter(Boolean))].sort((a, b) => b.length - a.length);
     const rows = res.tracks.filter((t) => !t.mediaRow); // the "CD"/"DVD" lines stay as they are
     if (C.hold === 'keep') {
       res.log.push(say('Maiuscole lasciate come sulla fonte', 'Capitalization left as on the source'));
@@ -1471,7 +1525,6 @@
       res.warn.push('Capitalization: check ' + [...flags].map((f) => '«' + f + '»').join(', ') +
         ': lowercase if preposition or conjunction, capitalized if adverb (e.g. "Keep On Rockin\'", "You Are So Beautiful").');
     }
-    if (count.sent || (!C.auto && !C.english)) res.warn.push('Non-English titles: check proper names, places and band names, which must be capitalized (e.g. "Il meglio di Elio e le Storie Tese").');
     if (count.keep) res.warn.push('German titles or titles in non-Latin scripts left as on Discogs (in German nouns are capitalized): check them by hand.');
     return res;
   }
@@ -1721,7 +1774,9 @@
   const fmtDate = (d) => [d.y, d.m, d.d].filter(Boolean).join('-');
   function recordingDates() {
     const key = (d) => d.y + (d.m || '00') + (d.d || '00');
-    const sentences = (D.notes || '').split(/\n+|(?<=[.!?])\s+/).filter((x) => /\b(record(ed|ing|ings)|registrat[oaie]|registrazion[ei]|enregistr|aufgenommen|grabad[oa]|tracked)\b/i.test(x));
+    // only when the source says it explicitly ("Recorded at…", "Registrato…"); no ©/℗ lines and no names like "… Recordings"
+    const EXPLICIT = /\b(recorded|recording (date|session)s?|registrat[oaie]|registrazion[ei]|enregistr[ée]|aufgenommen|aufnahme|grabad[oa]|grabaci[óo]n|gravad[oa]|tracked)\b/i;
+    const sentences = (D.notes || '').split(/\n+|(?<=[.!?])\s+/).filter((x) => EXPLICIT.test(x) && !/[©℗]|\((c|p)\)|\b(copyright|phonographic)\b/i.test(x));
     let dates = sentences.flatMap((x) => datesIn(x));
     let why = say('note', 'notes');
     if (!dates.length && /\blive\b|\bconcert/i.test(D.title || '')) { dates = datesIn(D.title || '').filter((d) => !d.weak); why = say('titolo del live', 'live title'); }
@@ -1886,6 +1941,42 @@
     creditObs.observe(ul, { childList: true });
   }
 
+  // Splits and collabs: when an artist appears in "File under", "Name - Title" in the tracklist becomes "[ArtistNNN] - Title"
+  const nameKey = (x) => String(x || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s*(&|\band\b|\+)\s*/g, ' & ').replace(/\s+/g, ' ').trim();
+  function filedArtists() {
+    return [...document.querySelectorAll('#filed_under_performerx li')].map((li) => {
+      const code = ((li.querySelector('input[type=text]') || {}).value || '').trim();
+      const a = li.querySelector('.filed_under_artist_preview a, .filed_under_artist_preview');
+      return { code, name: a ? a.textContent.trim() : '' };
+    }).filter((x) => /^\[Artist\d+\]$/.test(x.code) && x.name);
+  }
+  function linkTrackArtists() {
+    const map = new Map(filedArtists().map((x) => [nameKey(x.name), x.code]));
+    if (!map.size) return 0;
+    let n = 0;
+    const swap = (title) => {
+      const m = String(title || '').match(/^(.+?)\s+-\s+(.+)$/);
+      const code = m && map.get(nameKey(m[1]));
+      if (!code) return title;
+      n++;
+      return code + ' - ' + m[2];
+    };
+    document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { const v = swap(el.value); if (v !== el.value) setVal(el, v); });
+    const adv = $('#track_advanced');
+    if (adv && adv.value) {
+      const v = adv.value.split('\n').map((l) => { const p = l.split('|'); if (p.length > 1) p[1] = swap(p[1]); return p.join('|'); }).join('\n');
+      if (v !== adv.value) setVal(adv, v);
+    }
+    return n;
+  }
+  let filedObs = null;
+  function watchFiledUnder() {
+    const ul = $('#filed_under_performerx');
+    if (!ul || filedObs) return;
+    filedObs = new MutationObserver(() => { if (linkTrackArtists()) toast(say('Artisti collegati nella tracklist', 'Artists linked in the tracklist')); });
+    filedObs.observe(ul, { childList: true, subtree: true });
+  }
+
   // Physical edition sold on Bandcamp: the same release becomes a physical issue
   function applyPhysical(p) {
     const txt = [p.name, p.type, p.desc].filter(Boolean).join(', ');
@@ -1923,7 +2014,9 @@
     const RM = releaseMode();
     // "apply" buttons shown under the summary
     const actions = [];
-    const act = (label, run, color) => actions.push({ label, run, color });
+    const act = (label, run, color, once) => actions.push({ label, run, color, once });
+    // search buttons: they disappear after the click, so long V/A releases do not crowd the panel
+    const find = (label, who) => act(label, () => searchPerformer(who), '#2a6fdb', true);
     const primary = !$('#parent_id') || $('#parent_id').value === '0';
 
     const other = artistMismatch();
@@ -1944,12 +2037,11 @@
       // wiki order: orchestra, choir/ensemble, conductor, soloists
       const rank = (p) => (/orchestra|philharmoni|symphon/i.test(p) ? 0 : /choir|chorus|ensemble|quartet|trio|consort|chor\b/i.test(p) ? 1 : /conductor/i.test(p) ? 2 : 3);
       const perfs = [...new Set([...(D.performers || [])].sort((a, b) => rank(a) - rank(b)).map((p) => p.replace(/\s*\([^)]*\)$/, '')))];
-      todo.push(say('File under agli interpreti, in quest\'ordine: orchestra, coro, direttore, solisti', 'File under the performers, in this order: orchestra, choir, conductor, soloists') + (perfs.length ? ': ' + perfs.slice(0, 4).join(', ') : ''));
       warn.push(say('Classica: il "file under" va agli interpreti, non ai compositori. Collega i brani alle opere ([WorkXXXX]) come da wiki "Classical music".',
         'Classical: "file under" goes to the performers, not the composers. Link the tracks to the works ([WorkXXXX]) as per the "Classical music" wiki.'));
       if ((D.performers || []).length) warn.push(say('Interpreti su Discogs: ', 'Performers on Discogs: ') + D.performers.join(', ') + '.');
       if (!filedAlready && perfs.length) searchPerformer(perfs[0]);
-      perfs.slice(filedAlready ? 0 : 1, 6).forEach((p) => act(say('Cerca interprete: ', 'Search performer: ') + p, () => searchPerformer(p), '#2a6fdb'));
+      perfs.slice(filedAlready ? 0 : 1, 6).forEach((p) => find(say('Cerca interprete: ', 'Search performer: ') + p, p));
       // composers ("File under composer"): only those who wrote at least 25% of the release
       const comps = [...new Set((D.creditList || []).filter((c) => /composed by|^composer|written-by|music by/i.test(c.role)).map((c) => c.name))];
       if (comps.length) {
@@ -1966,7 +2058,7 @@
     } else if (D.various && mdesc.includes('Mixed') && djNames.length) {
       // DJ mix: filed under the DJ, not Various Artists, if the release is credited to them
       if (!filedAlready) searchPerformer(djNames[0]);
-      djNames.slice(filedAlready ? 0 : 1).forEach((n) => act(say('Cerca: ', 'Search: ') + n, () => searchPerformer(n), '#2a6fdb'));
+      djNames.slice(filedAlready ? 0 : 1).forEach((n) => find(say('Cerca: ', 'Search: ') + n, n));
       log.push('DJ Mix: file under ' + djNames.join(', '));
       todo.push(say('DJ Mix: file under al DJ (', 'DJ Mix: file under the DJ (') + djNames.join(', ') + say(') solo se la release è accreditata a lui, altrimenti Various Artists', ') only if the release is credited to them, otherwise Various Artists'));
       act(say('Usa Various Artists', 'Use Various Artists'), () => clickRadio('category', 'va'), '#555');
@@ -1981,28 +2073,24 @@
         clickRadio('collab_type', 'split');
         log.push(say('Split: ', 'Split: ') + names.join(' / '));
         sum.push('Split');
-        warn.push(say('Split: file under a ogni artista nell\'ordine della release, tutti con "Credited name"; ogni traccia "Artista - Titolo" (collega gli artisti).',
-          'Split: file under each artist in the order of the release, all with "Credited name"; every track "Artist - Title" (link the artists).'));
       } else if (RM.mode === 'collab') {
         clickRadio('collab_type', 'collab');
         log.push(say('Collaborazione: ', 'Collaboration: ') + names.join(' & '));
         warn.push(say('Collaborazione: se esiste un profilo per "', 'Collaboration: if a profile for "') + names.join(' & ') +
           say('" va nel file under (accreditato) e i singoli artisti senza "Credited name". Altrimenti solo i singoli artisti.', '" exists, file it (credited) and the single artists without "Credited name". Otherwise only the single artists.'));
         const collabName = names.join(' & ');
-        act(say('Cerca il profilo "', 'Search the profile "') + collabName + '"', () => searchPerformer(collabName), '#2a6fdb');
+        find(say('Cerca il profilo "', 'Search the profile "') + collabName + '"', collabName);
       }
       if (!filedAlready && names.length) {
         searchPerformer(names[0]);
-        warn.push(say('Artista non impostato: scegli "', 'Artist not set: pick "') + names[0] + say('" dai risultati a destra (1.3a).', '" from the results on the right (1.3a).'));
-        warn.push(say('Scegli l\'artista "', 'Pick the artist "') + names[0] + say('" a destra (1.3a)', '" on the right (1.3a)') + (names.length > 1 ? say(', poi: ', ', then: ') + names.slice(1).join(', ') : ''));
       }
-      names.slice(filedAlready ? 0 : 1).forEach((n) => act(say('Cerca: ', 'Search: ') + n, () => searchPerformer(n), '#2a6fdb'));
+      // only with several artists: with just one the search starts by itself
+      if (names.length > 1) names.slice(filedAlready ? 0 : 1).forEach((n) => find(say('Cerca: ', 'Search: ') + n, n));
       // 1.4 credited name: with "feat."/"with" or a name variation (ANV)
       const anvDiff = (D.artistsList || []).some((a) => a.anv && norm(a.anv) !== norm(a.name));
       if (RM.featured.length || RM.guests.length || anvDiff) {
         const credited = creditedString();
         act(say('Nome accreditato: ', 'Credited name: ') + credited, () => setCreditedName(credited), '#8e44ad');
-        warn.push(say('Nome accreditato diverso dal default (feat./with o variante del nome): pulsante sotto', 'Credited name differs from the default (feat./with or a name variation): button below'));
       }
       if (RM.featured.length || RM.guests.length) warn.push(say('"feat."/"with" nell\'artista: niente file under per ', '"feat."/"with" in the artist: no file under for ') + RM.featured.concat(RM.guests).join(', ') + say(', solo crediti featured/guest.', ', only featured/guest credits.'));
     }
@@ -2030,8 +2118,8 @@
     clickRadio('type', G.type);
     log.push('Type: ' + TYPE_NAME[G.type] + ' (' + G.reason + ')');
     sum.push(TYPE_NAME[G.type] + (G.sure ? '' : '?'));
-    if (G.unknown) { warn.push('No tracklist and no format hints: the type CANNOT be estimated, pick it yourself (1.5).'); todo.push('Pick the release type (1.5)'); }
-    else if (!G.sure) { warn.push('Estimated type (' + G.reason + '): check it (1.5). For Rym, what the artist or label declares is what counts.'); todo.push('Estimated type: ' + TYPE_NAME[G.type] + ' (' + G.reason + ')'); }
+    if (G.unknown) { todo.push('Pick the release type (1.5)'); }
+    else if (!G.sure) { todo.push('Estimated type: ' + TYPE_NAME[G.type] + ' (' + G.reason + ')'); }
     if (!G.sure && !G.unknown && /unknown duration|over/.test(G.reason)) warn.push('Missing durations: the estimate relies mostly on the number of tracks.');
     if (G.type === 'c' && D.various) warn.push('V/A compilation: for Rym it is a compilation only if more than 50% was previously released. If it is new material, use Standard Album.');
     if (G.type === 'j') warn.push('DJ Mix only if the release is credited to the DJ who mixed it.');
@@ -2048,7 +2136,6 @@
     if (G.type === 'i' && !digital) {
       suggested = singleTitle(T.tracks);
       if (suggested && suggested.toLowerCase() !== (T.title || '').toLowerCase()) {
-        warn.push('Rym standard single title: "' + suggested + '" (use the button below to apply it).');
       } else suggested = '';
     }
 
@@ -2057,16 +2144,14 @@
     let year = D.year;
     if (fmt && FORMAT_YEAR[fmt] && year && +year < FORMAT_YEAR[fmt]) {
       if (digital) {
-        warn.push(say('Data digitale ' + year + ' prima del 2000: per Rym non è affidabile, lasciata vuota (wiki "Digital releases" §3).', 'Digital date ' + year + ' before 2000: not reliable for Rym, left blank (wiki "Digital releases" §3).'));
         todo.push(say('Data digitale lasciata vuota (prima del 2000): cerca quando è uscita davvero in digitale', 'Digital date left blank (before 2000): find when it really came out digitally'));
         year = '';
       } else {
-        warn.push(say('Anno ' + year + ' strano per il formato ' + D.formatName + ' (prima del ' + FORMAT_YEAR[fmt] + '): controlla data o formato.', 'Year ' + year + ' is odd for the ' + D.formatName + ' format (before ' + FORMAT_YEAR[fmt] + '): check the date or the format.'));
         todo.push(say('Controlla anno e formato (', 'Check year and format (') + year + ', ' + D.formatName + ')');
       }
     }
     if (setSelect('year', year)) { const dd = [year, D.month, D.day].filter(Boolean).join('-'); log.push(say('Data: ', 'Date: ') + dd); sum.push(dd); }
-    else { warn.push(say('Anno non impostato.', 'Year not set.')); if (!(digital && D.year) && !(SRC === 'Bandcamp' && D.pubDate && (D.oldDate || D.lateUpload))) todo.push(say('Data mancante', 'Date missing')); }
+    else { if (!(digital && D.year) && !(SRC === 'Bandcamp' && D.pubDate && (D.oldDate || D.lateUpload))) todo.push(say('Data mancante', 'Date missing')); }
     if (year) { setSelect('month', D.month); setSelect('day', D.day); }
     // Discogs sometimes uses the © year as the date: Rym does not accept it (wiki "Add release information" §6)
     const cYears = [...(D.notes || '').matchAll(/[©℗]\s*(?:copyright\s*)?((?:19|20)\d\d)/gi)].map((m) => m[1]);
@@ -2088,13 +2173,14 @@
     if (setVal($('#title'), T.title)) log.push('Title');
     if (T.titleEn && setVal($('#title_en'), T.titleEn)) { touched.fields.add('title_en'); }
     log.push(...T.log);
-    warn.push(...T.warn);
+    // the long capitalization notice stays out: the short line below is enough
+    warn.push(...T.warn.filter((w) => !/^(Maiuscole: controlla|Capitalization: check)/.test(w)));
 
     // 3.1 Format
     if (fmt && clickRadio('format', fmt)) {
       log.push('Format: ' + (digital ? 'Digital File' : D.formatName));
       sum.push((digital ? (fmt === 59 ? 'Lossless Digital' : 'Digital File') : D.formatName) + (size ? ' ' + size : ''));
-    } else { warn.push('Format "' + D.formatName + '" not mapped: pick it by hand.'); todo.push('Pick the format (3.1)'); }
+    } else { todo.push('Pick the format (3.1)'); }
 
     if (digital) {
       // Bandcamp: usually both "Digital file" and "Streaming"; Streaming only if not downloadable
@@ -2112,7 +2198,7 @@
 
     // 3.2 Disc size (mandatory for vinyl; for CDs only if non-standard)
     if (size) { clickRadio('disc_size', DISC_SIZE[size]); log.push('Disc: ' + size); }
-    else if (fmt === 95) { warn.push('Vinyl without size: set Disc size (3.2).'); todo.push('Set Disc size (3.2)'); }
+    else if (fmt === 95) { todo.push('Set Disc size (3.2)'); }
 
     // 3.3 / 3.4 Label and catalog number (wiki "Catalog numbers")
     //  - no label: label "(No Label)" and catalog "n/a" (if Discogs gives no number)
@@ -2151,7 +2237,6 @@
       if (trib) todo.push(say('Tributo: in "Tribute(s)" metti il link [ArtistXXXX] di ', 'Tribute: in "Tribute(s)" put the [ArtistXXXX] link of ') + trib[1]);
     }
     if (noLabel) warn.push('No label' + (SRC === 'Bandcamp' ? ' (probably self-released)' : '') + ': pick "(No Label)" from the results on the right (3.3).');
-    else if (lab) warn.push('Label: click "' + lab.name + '" in the results on the right (3.3).');
 
     // Untitled releases ("Untitled" on Discogs), except singles (for them the title comes from the tracks):
     // the Rym wiki says self-titled (artist name); the catalog number is offered as an alternative.
@@ -2188,7 +2273,6 @@
       if (setVal($('#countries'), C.value)) {
         log.push('Country: ' + C.value);
         sum.push(C.value);
-        warn.push('Country: if Rym does not recognise "' + C.value + '", delete it and pick it from the suggestions (3.5).');
       }
       // "Europe" only when there is no way to find the country: the rights society often tells it (wiki "Places issued")
       if (/\bEurope\b/.test(C.value)) {
@@ -2266,7 +2350,7 @@
       const comps = [...new Set((D.creditList || []).filter((c) => /composed by|^composer|^score|music by/i.test(c.role)).map((c) => c.name))];
       if (comps.length) {
         warn.push(say('Colonna sonora: file under ai compositori con almeno il 25% della release: ', 'Soundtrack: file under the composers with at least 25% of the release: ') + comps.slice(0, 4).join(', '));
-        comps.slice(0, 5).forEach((c) => act(say('Cerca compositore: ', 'Search composer: ') + c, () => searchPerformer(c), '#2a6fdb'));
+        comps.slice(0, 5).forEach((c) => find(say('Cerca compositore: ', 'Search composer: ') + c, c));
       }
     }
     // recording date (primary issue only): from the "Recorded…" notes or the date in a live title
@@ -2284,7 +2368,6 @@
     const langs = lyricLanguages(T);
     if (langs.length && primary) {
       act(say('Lingue: ', 'Languages: ') + langs.join(', '), () => { setVal($('#languages'), langs.join(', ')); touched.fields.add('languages'); }, '#2a6fdb');
-      warn.push(say('Lingue stimate dai titoli: ', 'Languages estimated from the titles: ') + langs.join(', ') + say(' (solo se i testi sono davvero in queste lingue)', ' (only if the lyrics really are in them)'));
     }
     const flagWarn = T.warn.find((w) => w.startsWith('Capitalization: check'));
     if (flagWarn) todo.push('Capitalization to check: ' + flagWarn.replace(/^Capitalization: check (.*?): lowercase.*$/, '$1'));
@@ -2296,12 +2379,14 @@
         $('#track_advanced').value = T.tracks.map((t) => t.pos + '|' + t.title + '|' + t.dur).join('\n');
         W.goSimple();
         touched.tracks = true;
+        linkTrackArtists();
         const heads = T.tracks.filter((t) => t.header).length;
         log.push('Tracks: ' + (T.tracks.length - heads) + (heads ? ' + ' + heads + ' headers (works in several movements, no number)' : ''));
         sum.push((T.tracks.length - heads) + ' tracks' + (heads ? ' + ' + heads + ' headers' : '') + (isVinyl() && !durVinyl && (D.tracks || []).some((t) => t.dur) ? ', no track times' : ''));
       } catch (e) {
-        warn.push('Tracklist not inserted: use the "Copy tracks" button and paste them in Advanced mode.');
-        todo.push('Tracklist not inserted: use "Copy tracks" and paste it in Advanced');
+        // fallback: tracklist in the clipboard, to paste in Advanced
+        try { GM_setClipboard(T.tracks.map((t) => t.pos + '|' + t.title + '|' + t.dur).join('\n')); } catch (e2) { /* - */ }
+        todo.push(say('Tracklist non inserita: è negli appunti, incollala in Advanced', 'Tracklist not inserted: it is in the clipboard, paste it in Advanced'));
       }
     }
 
@@ -2316,16 +2401,12 @@
     }
     log.push(say('Fonte: ', 'Source: ') + SRC);
     if (D.fromMaster) todo.push(say('Dal master Discogs è stata presa la release principale: controlla che sia l\'issue che hai', 'The main release was taken from the Discogs master: check it is the issue you own'));
-    if (SRC === 'Discogs') warn.push(say('Discogs è una fonte secondaria per Rym: verifica sulla tua copia.', 'Discogs is a secondary source for Rym: check against your copy.'));
 
     // General warnings
-    if (desc.includes('Reissue') || desc.includes('Repress')) { warn.push('It is a reissue: set the "Primary issue" (1.1).'); todo.push('Reissue: set the primary issue (1.1)'); }
+    if (desc.includes('Reissue') || desc.includes('Repress')) { todo.push('Reissue: set the primary issue (1.1)'); }
     else if (D.masterYear && D.year && +D.year > +D.masterYear && D.mainRelease !== D.id) {
       warn.push('Discogs: this record was first released in ' + D.masterYear + ', this one is from ' + D.year + '. Probably a reissue: add it as an issue of the existing release (1.1).');
       todo.push('Probably a reissue (first released ' + D.masterYear + '): add it as an issue (1.1)');
-    }
-    if ((D.featured || []).length) {
-      warn.push('Featured on Discogs: ' + D.featured.join(', ') + '.');
     }
     // credits: ready lines (plain text) to link with the search, featured/guest/remixer included
     const lines = creditLines(T);
@@ -2334,8 +2415,8 @@
       if (unknownRoles.size) todo.push(say('Ruoli non trovati nella lista Rym, correggili: ', 'Roles not found in the Rym list, fix them: ') + [...unknownRoles].join(', '));
       if (!primary) warn.push(say('Issue secondaria: aggiungi solo i crediti che non sono già sulla primary (es. bonus track, featured, remixer).', 'Secondary issue: add only the credits not already on the primary (e.g. bonus tracks, featured, remixers).'));
     }
-    if (desc.includes('Promo')) { warn.push('Promo: for Rym it is a secondary issue of the main release (1.1).'); todo.push('Promo: add it as a secondary issue (1.1)'); }
-    if ((D.labels || []).length > 1) { warn.push('Several labels on Discogs: Rym takes one, the most specific (or the one closest to the artist).'); todo.push('Several labels on Discogs: pick one'); }
+    if (desc.includes('Promo')) { todo.push('Promo: add it as a secondary issue (1.1)'); }
+    if ((D.labels || []).length > 1) { todo.push('Several labels on Discogs: pick one'); }
 
     filledRaw = rawSeen;
     settingsChanged = false;
@@ -2343,7 +2424,7 @@
     // only one title proposed, to avoid confusion
     const best = suggestions.find((x) => x && x.toLowerCase() !== (T.title || '').toLowerCase());
     if (best) actions.unshift({ title: best });
-    report({ sum, spunte: [...attrs.values()], todo, details: log.concat(warn) }, actions);
+    report({ sum, spunte: [...attrs.values()], todo, details: warn, log }, actions);
   }
 
   // ---- panel ----
@@ -2373,14 +2454,10 @@
       '<div id="drym_bar"></div><div id="drym_out" style="margin-top:6px"></div>';
 
     const bar = panel.querySelector('#drym_bar');
+    watchFiledUnder();
     panel.querySelector('#drym_x').addEventListener('click', () => panel.remove());
     bar.appendChild(btn('Fill form', fill, '#27ae60'));
     if (other) bar.appendChild(btn('Search "' + D.artistSearch + '" on Rym', () => GM_openInTab('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent(D.artistSearch) + '&searchtype=a', { active: true }), '#b03a2e'));
-    bar.appendChild(btn('Copy tracks', () => GM_setClipboard(prepare().tracks.map((t) => t.pos + '|' + t.title + '|' + t.dur).join('\n'))));
-    if (D.country) bar.appendChild(btn('Copy country', () => GM_setClipboard(D.country)));
-    if ((D.credits || []).length) bar.appendChild(btn('Copy credits', () => GM_setClipboard(D.credits.join('\n'))));
-    // duplicate check: the wiki asks to always search before adding
-    bar.appendChild(btn(say('Cerca su Rym', 'Search Rym'), () => GM_openInTab('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent((D.artistSearch || D.artist) + ' ' + D.title) + '&searchtype=l', { active: true }), '#2a6fdb'));
     if (D.artUrl) bar.appendChild(btn(say('Copertina originale', 'Original cover'), () => GM_openInTab(D.artUrl, { active: true }), '#2a6fdb'));
     if (D.embed) bar.appendChild(btn(say('Copia embed (media link)', 'Copy embed (media link)'), () => { GM_setClipboard(D.embed); toast(say('Embed copiato: incollalo in "Submit media links" sulla pagina della release.', 'Embed copied: paste it in "Submit media links" on the release page.')); }, '#2a6fdb'));
     if (D.physicalApplied) bar.appendChild(btn(say('Torna al digitale', 'Back to digital'), () => { rawSeen = null; D = null; loadData(); renderPanel(); }, '#555'));
@@ -2443,15 +2520,17 @@
     lastReport = [R, actions];
     const out = panel.querySelector('#drym_out');
     out.innerHTML =
-      // the filled data is already in the header: here only the ticked boxes
-      '<div style="color:#7dda8a;font-size:12px">✔ ' + say('Compilato', 'Filled') + (R.spunte.length ? ' · ' + esc(R.spunte.join(', ')) : '') + '</div>' +
-      (R.todo.length ? '<div style="color:#f5c26b;margin-top:6px;font-size:13px"><b>' + say('Da fare', 'To do') + '</b><br>• ' + R.todo.map(esc).join('<br>• ') + '</div>' : '') +
+      // short panel: no "To do"; the useful notes sit at the top of the Details (collapsed)
+      '<div style="color:#7dda8a;font-size:12px">✔ ' + say('Compilato', 'Filled') + '</div>' +
       '<details style="margin-top:6px;opacity:.8;font-size:12px"><summary style="cursor:pointer">Details</summary>' +
-      R.details.map((d) => '<div>' + esc(d) + '</div>').join('') + '</details>';
+      [...new Set(R.todo.concat(R.details))].map((d) => '<div>' + esc(d) + '</div>').join('') + '</details>';
     const suggested = (actions || []).filter((a) => a.title != null).map((a) => a.title);
-    (actions || []).filter((a) => a.title == null).forEach((a) => {
+    (actions || []).filter((a) => a.title == null && !(a.once && a.done)).forEach((a) => {
       out.appendChild(btn(a.label, (e) => {
-        try { a.run(); e.target.textContent = '✔ ' + a.label; } catch (err) { toast(String(err && err.message || err), false); }
+        try {
+          a.run();
+          if (a.once) { a.done = true; e.target.remove(); } else e.target.textContent = '✔ ' + a.label;
+        } catch (err) { toast(String(err && err.message || err), false); }
       }, a.color || '#2a6fdb'));
     });
     [...new Set(suggested)].forEach((t) => {
