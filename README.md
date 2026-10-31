@@ -100,4 +100,4 @@ The script only reads the release from the Discogs API or from the Bandcamp or B
 
 ## Feedback
 
-Bug reports and ideas are welcome. Please open an issue with the link to the Discogs or Bandcamp release.
+Bug reports and ideas are welcome. Please open an issue with the link to the release.
