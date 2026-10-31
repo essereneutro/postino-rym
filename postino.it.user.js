@@ -331,8 +331,8 @@
       const digitalRel = releases.find((x) => /DigitalFormat$/.test(String(x.musicReleaseFormat || '')));
       const recordLabel = (labelOf(digitalRel) || releases.map(labelOf).find(Boolean) || '').trim();
       const publisher = (ld?.publisher?.name || '').trim();
-      const labelName = recordLabel || (publisher && publisher.toLowerCase() !== artist.toLowerCase() ? publisher : '');
-      const labels = labelName && labelName.toLowerCase() !== artist.toLowerCase() ? [{ name: labelName, catno: '', noCat: false }] : [];
+      let labelName = recordLabel || (publisher && publisher.toLowerCase() !== artist.toLowerCase() ? publisher : '');
+      let labels = labelName && labelName.toLowerCase() !== artist.toLowerCase() ? [{ name: labelName, catno: '', noCat: false }] : [];
 
       // Data, es. "15 Mar 2019 00:00:00 GMT"
       const ymd = (v) => { const x = new Date(v || ''); return isNaN(x) ? null : [String(x.getUTCFullYear()), pad2(x.getUTCMonth() + 1), pad2(x.getUTCDate())]; };
@@ -374,6 +374,24 @@
       const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const ART = new RegExp('^\\s*' + esc(artist) + '\\s*(?::|\\s-|\\s–)\\s+', 'i');
       if (tracks.length && tracks.filter((t) => ART.test(t.title)).length >= Math.ceil(tracks.length / 2)) tracks.forEach((t) => { t.title = t.title.replace(ART, ''); });
+      // tracce "Artista - Titolo" (compilation di etichetta): artista e titolo separati
+      const SEP_T = /^(.+?)\s+[-–—]\s+(.+)$/;
+      if (tracks.length >= 2 && tracks.filter((t) => !t.artist && SEP_T.test(t.title)).length >= Math.ceil(tracks.length * 0.8)) {
+        tracks.forEach((t) => { const m = !t.artist && t.title.match(SEP_T); if (m) { t.artist = m[1].trim(); t.title = m[2].trim(); } });
+      }
+      const keyOf = (x) => (x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      tracks.forEach((t) => { t.artists = (t.artist || '').split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean); });
+      const trackNames = [];
+      tracks.forEach((t) => t.artists.forEach((n) => { if (!trackNames.some((x) => keyOf(x) === keyOf(n))) trackNames.push(n); }));
+      const others = trackNames.filter((n) => keyOf(n) !== keyOf(artist));
+      // l'account della pagina è spesso l'etichetta: con artisti diversi nelle tracce è un V/A (o split) dell'etichetta
+      const pageTitle = (tr?.current?.title || ld?.name || '');
+      const vaWords = /\b(various artists|v\/a)\b|(^|[\s\/|(\[-])va([\s)\]:|\/-]|$)/i.test(pageTitle + ' ' + artist);
+      const labelish = /\b(records?|recordings|sounds?|music|label|tapes|audio|editions?|productions?|imprint|collective)\b/i.test(artist);
+      let multi = false, realArtist = artist;
+      if (others.length >= 2 || (vaWords && trackNames.length >= 2)) multi = true;
+      else if (others.length === 1 && trackNames.length === 1 && (labelish || tracks.every((t) => t.artists.length))) realArtist = others[0];
+      if ((multi || realArtist !== artist) && !labels.length) labels = [{ name: artist, catno: '', noCat: false }];
 
       // pagina traccia che fa parte di un album: non è un singolo a sé
       const partOfAlbum = isTrack && !!(tr?.album_url || (ld?.inAlbum && (ld.inAlbum.numTracks || 0) > 1));
@@ -418,15 +436,15 @@
       return {
         source: 'Bandcamp',
         url: location.origin + location.pathname,
-        artist,
-        artistSearch: artist,
+        artist: multi ? 'Various Artists' : realArtist,
+        artistSearch: multi ? '' : realArtist,
         title,
         year, month, day,
         labels,
         country: '',
         formatName: 'File',
         boxSet: false,
-        various: isVarious(artist),
+        various: multi || isVarious(artist),
         descriptions: [],
         formatTexts: [],
         tracks,
@@ -1446,6 +1464,8 @@
     // le quadre restano solo per il testo editoriale in minuscolo ("[bonus track]", "[untitled]")
     x = x.replace(/\[([^\]]*)\]/g, (all, inner) => (/^[a-z0-9 .,'#&-]+$/.test(inner) && /[a-z]/.test(inner) ? all : '(' + inner + ')'));
     x = x.replace(/\|/g, '/');
+    // "Vol.1" -> "Vol. 1" (anche Pt., No., Op., Nr., Ch., Bk., Mvt.)
+    x = x.replace(/\b(Vol|Pt|No|Op|Nr|Ch|Bk|Mvt)\.(?=\d)/gi, '$1. ');
     return x.replace(/\s{2,}/g, ' ').trim();
   }
 
@@ -1501,7 +1521,7 @@
         if (t.header || !t.artist || isVarious(t.artist)) return;
         if (t.title.toLowerCase().startsWith(t.artist.toLowerCase() + ' - ')) return;
         t.plain = t.title; // titolo senza artista: serve per il titolo proposto dei singoli
-        t.title = t.artist + ' - ' + t.title; withArtist++;
+        t.title = joinNames(t.artist) + ' - ' + t.title; withArtist++;
       });
       if (withArtist) res.log.push('V/A: nome dell\'artista davanti al titolo in ' + withArtist + ' tracce');
     }
@@ -1509,6 +1529,15 @@
       if (t.header && t.title && !/^\[b\][\s\S]*\[\/b\]$/i.test(t.title)) t.title = '[b]' + t.title + '[/b]';
     });
     return res;
+  }
+
+  // più artisti: "A & B", "A, B & C" (le parti con feat./vs./x restano così)
+  function joinNames(str) {
+    return String(str || '').split(/(\s+(?:feat\.?|ft\.?|featuring|vs\.?|with|x|pres\.?|presents)\s+)/i).map((seg, i) => {
+      if (i % 2) return seg;
+      const n = seg.split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean);
+      return n.length < 2 ? seg : n.length === 2 ? n.join(' & ') : n.slice(0, -1).join(', ') + ' & ' + n[n.length - 1];
+    }).join('');
   }
 
   // Titolo e tracce con posizioni Rym e maiuscole corrette
@@ -1525,16 +1554,23 @@
     {
       const CODE = '([A-Za-z]{2,8}[\\s-]?\\d{2,5}[A-Za-z]?)';
       const okCode = (c) => !/^(ep|lp|cd|dvd|vol|part|pt|no|op|mix|tape|demo|side|disc|track|bwv|kv|d)\b/i.test(c.replace(/[\s-]?\d.*$/, '')) && !/^(19|20)\d\d$/.test(c.replace(/^\D+/, ''));
-      const pats = [new RegExp('^\\s*[\\[(]\\s*' + CODE + '\\s*[\\])]\\s*[-–:|]?\\s*(.+)$'), new RegExp('^\\s*' + CODE + '\\s+[-–:|]\\s+(.+)$')];
+      const pats = [new RegExp('^\\s*[\\[(]\\s*' + CODE + '\\s*[\\])]\\s*[-–—:|/~]{0,3}\\s*(.+)$'), new RegExp('^\\s*' + CODE + '\\s*[-–—:|/~]{1,3}\\s+(.+)$')];
       const endPat = new RegExp('^(.+?)\\s*[\\[(]\\s*' + CODE + '\\s*[\\])]\\s*$');
       let m = null, code = '', rest = '';
       for (const p of pats) { m = res.title.match(p); if (m && okCode(m[1])) { code = m[1]; rest = m[2]; break; } }
-      if (!code) { m = res.title.match(endPat); if (m && okCode(m[2])) { code = m[2]; rest = m[1]; } }
+      const endPat2 = new RegExp('^(.+?)\\s+[-–—:|/~]{1,3}\\s*' + CODE + '\\s*$');
+      if (!code) { m = res.title.match(endPat) || res.title.match(endPat2); if (m && okCode(m[2])) { code = m[2]; rest = m[1]; } }
       if (code && rest.trim()) {
         res.titleCat = code.toUpperCase();
         res.log.push(say('Sigla di catalogo tolta dal titolo: ', 'Catalog code removed from the title: ') + res.titleCat);
         res.title = rest.trim();
       }
+    }
+    // V/A: "/ Various Artists", "- VA", "(V/A)", "VA - " non fanno parte del titolo (salvo che il titolo sia solo quello)
+    if (D.various) {
+      const VAW = '(?:various artists|v\\/a|va)';
+      const cut = res.title.replace(new RegExp('\\s*(?:[-–—:|/~]+\\s*)?[\\[(]?' + VAW + '[\\])]?\\s*$', 'i'), '').replace(new RegExp('^\\s*[\\[(]?' + VAW + '[\\])]?\\s*[-–—:|/~]+\\s*', 'i'), '').trim();
+      if (cut && cut !== res.title) { res.log.push(say('Tolto "Various Artists" dal titolo: «', '"Various Artists" removed from the title: «') + res.title + '» → «' + cut + '»'); res.title = cut; }
     }
     if (fixedText) res.log.push(say('Caratteri sistemati (apostrofi, virgolette, trattini, parentesi): ', 'Characters fixed (apostrophes, quotes, dashes, brackets): ') + fixedText + say(' titoli', ' titles'));
     // traduzioni di Discogs separate da " = "
