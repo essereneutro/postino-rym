@@ -13,7 +13,7 @@ It never submits anything by itself: you check the form, press Preview and submi
 - **Date, title, format and disc size** (also non-standard sizes). It warns about dates that are impossible for the format (a CD before 1982, a digital release before 2000) and about dates that look like the © year.
 - **Localized English title** for titles in a non-Latin script, when Discogs gives a translation (`Original = Translation`).
 - **Label**: the most specific one, skipping label groups and distributors, as Rym asks.
-- **Catalog number** (`n/a` when there is no label or no number, as Rym asks). A code in the release title, like `[UX009] Title`, is moved to the catalog number. Amazon codes, label codes (LC), SPARS codes and barcodes are dropped.
+- **Catalog number** (`n/a` when there is no label or no number, as Rym asks). A code in the release title, like `[UX009] Title` or `CMX001 :: Title`, is moved to the catalog number. Amazon codes, label codes (LC), SPARS codes and barcodes are dropped.
 - **Country**, with the official Rym names (Russia → Russian Federation, Czech Republic → Czechia...). No country for digital releases.
 - **Issue attributes**: colored vinyl, 180 gram, 33 rpm, gatefold, digipak, limited, numbered, remastered, box set, bonus DVD, USB, no artwork...
 - **Performance attributes**: live, remixes, instrumental, demo recordings, promotional demo, archival, soundtrack, songs "inspired by", Creative Commons, AI-generated (only when stated)... (Rym thresholds: more than 50% of the tracks; remixes are recognised from `(Name Remix)` / `(Name Mix)` titles and from the Remix credits, but the artist's own versions (Dub, Club, Vocal, "Artist Mix") are not remixes; when only the title or the notes say "live", a button lets you tick it)
@@ -25,8 +25,8 @@ It never submits anything by itself: you check the form, press Preview and submi
   - `Digital Bonus Tracks` header with its own numbering
   - untitled tracks as `[untitled]`; rows without audio removed
   - "(Original Mix)" and "feat. ..." removed from titles (featured artists go in the credits)
-  - on splits and Various Artists releases: `Artist - Title`; on splits, as soon as you pick an artist in "File under", its name in the tracklist becomes the Rym code (`[Artist123] - Title`); on Various Artists releases a 🔍 next to each artist in the tracklist searches it in the credits box, and the result you pick is linked in all its tracks (no credit line is added)
-- **Text**: straight apostrophes and quotes, plain hyphens, round brackets, no invisible or "decorative" characters.
+  - on splits and Various Artists releases: `Artist - Title`, with several artists written `A & B` or `A, B & C`; on splits, as soon as you pick an artist in "File under", its name in the tracklist becomes the Rym code (`[Artist123] - Title`); on Various Artists releases a 🔍 next to each artist in the tracklist searches it in the credits box, and the result you pick is linked in all its tracks (no credit line is added)
+- **Text**: straight apostrophes and quotes, plain hyphens, round brackets, `Vol. 1` (not `Vol.1`), no invisible or "decorative" characters.
 - **Capitalization**: Rym rules for English titles (slang like `da` for "the" included), first letter only for other languages, with the special rules for Turkish, Indonesian, Filipino, French, Dutch and Russian. German and non-Latin scripts are left as they are. Titles of the same record follow the same rules. In Italian titles, common proper names (regions, cities, countries, first names) and the names in the credits stay capitalized. You can switch the mode with a checkbox.
 - **Sources**: the Discogs or Bandcamp link.
 
@@ -52,6 +52,7 @@ Uncertain choices are never applied by themselves: they appear as buttons, and y
 - **Embed code** for the Rym media links.
 - **Physical editions** on sale (vinyl, CD, cassette): one click turns the release into a physical issue.
 - Positions and the artist name written in the track titles (`A1 Ter Bandits : Calling Pete`) are removed.
+- Label pages: when the tracks are `Artist - Title` by different artists, the release is a Various Artists (or split) release, the page name becomes the label and `Various Artists` is removed from the title.
 
 ## Beatport extras
 
@@ -100,4 +101,4 @@ The script only reads the release from the Discogs API or from the Bandcamp or B
 
 ## Feedback
 
-Bug reports and ideas are welcome. Please open an issue with the link to the release.
+Bug reports and ideas are welcome. Please open an issue with the link to the Discogs or Bandcamp release.
