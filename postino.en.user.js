@@ -36,6 +36,7 @@
   const $ = (sel) => document.querySelector(sel);
   const pad2 = (n) => String(n).padStart(2, '0');
   const isVarious = (name) => /^various( artists)?$/i.test(clean(name));
+  const COMPILER_ROLE = /\b(compiled|compiler|presenter|presented|selected|selector|curated|curator)\b/i;
 
   function css(el, styles) { Object.assign(el.style, styles); return el; }
 
@@ -185,6 +186,21 @@
         return pipe(a.trim());
       };
       const namesOf = (list) => (list || []).map((x) => clean(x.name)).filter((x) => x && !isVarious(x));
+      // the API sometimes omits sub-track artists: they are taken from the Discogs page data (same release)
+      const pageArtists = new Map();
+      try {
+        const ds = JSON.parse(document.getElementById('dsdata').textContent).data || {};
+        if (Object.keys(ds).some((k) => k === 'Release:{"discogsId":' + d.id + '}')) {
+          Object.values(ds).forEach((v) => {
+            if (!v || !/^(Sub)?Track$/.test(v.__typename || '') || !(v.primaryArtists || []).length) return;
+            const list = v.primaryArtists.map((a) => ({ name: a.displayName || '', anv: a.nameVariation || '', join: a.joiningText || '' }));
+            pageArtists.set((v.position || '').trim() + '|' + (v.title || '').trim(), list);
+          });
+        }
+      } catch (e) { /* pagina senza dati: si usa solo l'API || page without data: only the API is used */ }
+      const subArtists = (s, t) => ((s.artists || []).length ? s.artists : pageArtists.get((s.position || '').trim() + '|' + (s.title || '').trim()) || t.artists);
+      // "disc.track" positions used by the regular tracks: "13.1" sub-tracks are tracks of disc 13, not movements
+      const discPrefixes = new Set((d.tracklist || []).filter((t) => t.type_ === 'track').map((t) => ((t.position || '').trim().match(/^(\d+)[.-]\d+$/) || [])[1]).filter(Boolean));
       let n = 0;
       const tracks = [];
       // medium given by the headings ("CD 1", "DVD"): passed on to the following tracks
@@ -217,8 +233,10 @@
             const sp = (s.position || '').trim();
             const letter = String.fromCharCode(97 + k);
             // "3.1", "3.a", "a" or empty -> "3a", "3b"…; already distinct positions ("4", "B2", "3a") stay
-            const pos = (!sp || dotted(sp) || /^[a-z]$/i.test(sp)) && work ? work + letter : (sp || String(n));
-            tracks.push(hint({ pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(s.artists || t.artists), artists: namesOf(s.artists || t.artists) }));
+            const discTrack = !(t.position || '').trim() && /^(\d+)[.-]\d+$/.test(sp) && discPrefixes.has(sp.match(/^(\d+)/)[1]);
+            const pos = discTrack ? sp : (!sp || dotted(sp) || /^[a-z]$/i.test(sp)) && work ? work + letter : (sp || String(n));
+            const sa = subArtists(s, t);
+            tracks.push(hint({ pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(sa), artists: namesOf(sa) }));
           });
           return;
         }
@@ -256,7 +274,9 @@
         styles: d.styles || [],
         notes: d.notes || '',
         bonusHeading: (d.tracklist || []).some((t) => t.type_ === 'heading' && /bonus/i.test(t.title || '')),
-        compiledBy: (d.extraartists || []).some((c) => /compiled by/i.test(c.role || '') && !c.tracks),
+        compiledBy: (d.extraartists || []).some((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks),
+        // who compiled/presented the collection (may also appear as the release artist)
+        compilers: (d.extraartists || []).filter((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks).map((c) => clean(c.name)),
         // "feat." to add as featured credits on Rym (per track or for the whole release)
         featured: [...new Set([
           ...(d.tracklist || []).flatMap((t) => [t].concat(t.sub_tracks || []))
@@ -593,7 +613,7 @@
     if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
     const str = (v) => (v == null ? '' : String(v));
     const arr = (v) => (Array.isArray(v) ? v : []);
-    ['descriptions', 'formatTexts', 'vinylTexts', 'credits', 'genres', 'styles', 'performers', 'featured'].forEach((k) => { o[k] = arr(o[k]).filter((x) => typeof x === 'string'); });
+    ['descriptions', 'formatTexts', 'vinylTexts', 'credits', 'genres', 'styles', 'performers', 'featured', 'compilers'].forEach((k) => { o[k] = arr(o[k]).filter((x) => typeof x === 'string'); });
     o.labels = arr(o.labels).filter((l) => l && typeof l === 'object').map((l) => ({ name: str(l.name), catno: str(l.catno), noCat: !!l.noCat }));
     o.tracks = arr(o.tracks).filter((t) => t && typeof t === 'object').map((t) => Object.assign({}, t, { pos: str(t.pos), title: str(t.title), dur: str(t.dur), artist: str(t.artist) }));
     ['title', 'artist', 'artistSearch', 'year', 'month', 'day', 'country', 'formatName', 'url', 'notes',
@@ -849,7 +869,9 @@
     }
 
     if (desc.includes('Unofficial Release')) return { type: 'b', reason: 'unofficial on Discogs', sure: true };
-    if (desc.includes('Mixed')) return { type: 'j', reason: '"Mixed" on Discogs', sure: true };
+    // "Mixed" = DJ mix only if the tracks are by different artists; a single-artist continuous record stays an album
+    const RMx = releaseMode();
+    if (desc.includes('Mixed') && (D.various || RMx.mode === 'va' || RMx.trackArtists)) return { type: 'j', reason: say('"Mixed" su Discogs, artisti diversi', '"Mixed" on Discogs, different artists'), sure: true };
     if (desc.includes('Mixtape')) return { type: 'm', reason: '"Mixtape" on Discogs', sure: true };
     // compilation for Rym = previously released material (over 50%). The Discogs tag on V/A is unreliable:
     // long V/A = compilation unless unreleased tracks are stated; 3-4 track V/A = no, unless "previously released" is in the notes
@@ -980,6 +1002,8 @@
 
   function capWord(token, isFirst, isLast, mode, flags) {
     const m = token.match(/^([^\p{L}\p{N}'’]*)(.*?)([^\p{L}\p{N}'’.&]*)$/u);
+    // codes with digits and a hyphen ("289-m", "CKD-289") stay as they are
+    if (/\d/.test(m[2]) && m[2].includes('-') && !/^\d+-\d+$/.test(m[2])) return token;
     const pieces = m[2].split('-'); // hyphenated compounds: each part as a separate word ("Will-o'-the-Wisp", "Drive-In")
     const out = pieces.map((p, k) => capPiece(p, isFirst && k === 0, isLast && k === pieces.length - 1, mode, flags));
     // Indonesian: partial reduplication ("Berlompat-lompat") -> second part lowercase
@@ -1066,6 +1090,7 @@
       return seg.split(/(\s+)/).map((tok) => {
         if (!/[\p{L}\p{N}]/u.test(tok)) return tok;
         const m = tok.match(/^([^\p{L}\p{N}'’]*)(.*?)([^\p{L}\p{N}'’.&]*)$/u);
+        if (/\d/.test(m[2]) && m[2].includes('-') && !/^\d+-\d+$/.test(m[2])) { first = false; return tok; }
         const out = m[2].split('-').map((p, k) => sentencePiece(p, first && k === 0, mode)).join('-');
         first = false;
         return m[1] + out + m[3];
@@ -1355,7 +1380,7 @@
     if (remixShare > 0.5) out.push([24, 'Remixes', isSingle ? 'focal track is a remix' : pct(remixShare)]);
 
     // Selector Comp: unmixed V/A compilation with a credited compiler
-    if (D.various && D.compiledBy && !desc.includes('Mixed')) {
+    if ((D.various || releaseMode().byCompiler) && D.compiledBy && !desc.includes('Mixed')) {
       out.push([10, 'Selector Comp', 'credited compiler']);
       warn.push('Selector Comp: add the compiler in the credits (role "compiler").');
     }
@@ -1494,12 +1519,18 @@
       names.forEach((n) => { if (n && !isVarious(n) && !distinct.some((x) => norm(x) === norm(n))) distinct.push(n); });
     });
     let mode = 'single';
+    // the release artist is who compiled/presented the collection and the tracks are by others: it is a V/A
+    const compilers = (D.compilers || []).map(norm);
+    const byCompiler = fileUnder.length > 0 && fileUnder.every((n) => compilers.includes(norm(n))) && distinct.filter((n) => !compilers.includes(norm(n))).length >= 2;
     if (D.classical) mode = 'classical';
+    else if (byCompiler) mode = 'va';
     else if (D.various) mode = distinct.length >= 5 || distinct.length < 2 ? 'va' : 'split';
     // 2-4 artists: split when each track has its own artist, collaboration when the tracks carry no names (written together)
     else if (fileUnder.length >= 2 && fileUnder.length <= 4) mode = distinct.length >= 2 ? 'split' : 'collab';
     else if (fileUnder.length >= 2) mode = joinKind === 'split' ? 'split' : 'collab';
-    return { mode, fileUnder: mode === 'split' && D.various ? distinct : fileUnder, featured, guests, distinct, joinKind };
+    // tracks with their own artists, different from the release ones: "Artist - Title" also outside V/A
+    const others = distinct.filter((n) => !fileUnder.some((f) => norm(f) === norm(n)));
+    return { mode, fileUnder: mode === 'split' && D.various ? distinct : fileUnder, featured, guests, distinct, joinKind, byCompiler, compilers: byCompiler ? fileUnder : [], trackArtists: others.length >= 2 };
   }
 
   // Title and tracks ready for Rym. Lines without a number (suites, works, sections, "CD"/"DVD")
@@ -1515,7 +1546,7 @@
     // Various Artists: "Artist - Title" (short dash with spaces), after capitalization so the name stays as it is
     // splits (2-4 artists) also need "Artist - Title" on every track (wiki "Add a release" §4)
     const RM = releaseMode();
-    if (RM.mode === 'va' || RM.mode === 'split') {
+    if (RM.mode === 'va' || RM.mode === 'split' || RM.trackArtists) {
       let withArtist = 0;
       res.tracks.forEach((t) => {
         if (t.header || !t.artist || isVarious(t.artist)) return;
@@ -2025,6 +2056,8 @@
   // Discogs tracks ("A1 to B3, B5") -> Rym: ranges with "-" that do not cross sides or discs (wiki §18.3)
   function rymTracks(spec, T) {
     if (!spec) return '';
+    const byDisc = discTracks(spec, T);
+    if (byDisc) return byDisc;
     const rows = T.tracks.filter((t) => !t.header);
     const key = (p) => String(p || '').trim().toUpperCase().replace(/\.$/, '');
     const idx = new Map();
@@ -2051,8 +2084,40 @@
     if (start != null) out.push(span(start, prev));
     return out.join(', ');
   }
+  // credits per disc ("Vol. 1 & 2", "CD1", "Disc 3-12"): one range per disc, first to last track (wiki §18.3: no ranges across media)
+  function discTracks(spec, T) {
+    const m = String(spec).trim().match(/^(?:vol(?:ume)?s?\.?|cds?|discs?|disks?|dvds?)\s*(.+)$/i);
+    if (!m || !/^\d/.test(m[1])) return '';
+    // volume -> disc from the headings ("Volume 12 …" followed by 13.1); otherwise volume N = disc N
+    const vols = [];
+    let pend = null;
+    T.tracks.forEach((t) => {
+      const h = t.header && String(t.title || '').replace(/\[\/?b\]/g, '').match(/^(?:vol(?:ume)?\.?|cd|disc|disk)\s*(\d+[a-z]?)\b/i);
+      if (h) { pend = h[1].toLowerCase(); return; }
+      const dm = !t.header && String(t.orig || '').match(/^(\d+)[.-]\d+/);
+      if (pend && dm) { vols.push({ v: pend, disc: dm[1] }); pend = null; }
+    });
+    const discOf = (v) => (vols.find((x) => x.v === v) || {}).disc || v.replace(/\D+$/, '');
+    const order = vols.map((x) => x.v);
+    const discs = [];
+    m[1].split(/\s*(?:,|&|\band\b|\+)\s*/i).forEach((part) => {
+      const r = part.trim().toLowerCase().split(/\s*(?:-|–|\bto\b)\s*/);
+      if (r.length === 2 && order.includes(r[0]) && order.includes(r[1])) order.slice(order.indexOf(r[0]), order.indexOf(r[1]) + 1).forEach((v) => discs.push(discOf(v)));
+      else if (r.length === 2 && /^\d+$/.test(r[0]) && /^\d+$/.test(r[1])) { for (let i = +r[0]; i <= +r[1]; i++) discs.push(discOf(String(i))); }
+      else if (r[0]) discs.push(discOf(r[0]));
+    });
+    const rows = T.tracks.filter((t) => !t.header);
+    const out = [];
+    for (const dsc of [...new Set(discs)]) {
+      const list = rows.filter((t) => (String(t.orig || '').match(/^(\d+)[.-]\d+/) || [])[1] === dsc);
+      if (!list.length) return '';
+      out.push(list.length === 1 ? list[0].pos : list[0].pos + '-' + list[list.length - 1].pos);
+    }
+    return out.join(', ');
+  }
   function creditLines(T) {
     unknownRoles.clear();
+    const vaRel = releaseMode().mode === 'va';
     const groups = new Map(), special = new Map();
     const addSpecial = (name, role, tracks) => {
       String(name).split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean).forEach((n) => {
@@ -2067,7 +2132,8 @@
       if (D.classical && /composed by|composer|written-by|lyrics by|libretto|arranged by|music by/i.test(c.role)) return;
       const tracks = rymTracks(c.tracks, T);
       c.role.split(/,\s*(?![^\[]*\])/).forEach((r) => {
-        const role = rymRole(r);
+        // in V/A releases whoever presents or selects the collection is Rym's "compiler"
+        const role = COMPILER_ROLE.test(r) && !c.tracks && vaRel ? 'compiler' : rymRole(r);
         if (!role) return;
         if (role === 'featured' || role === 'guest') return addSpecial(c.name, role, tracks);
         const k = c.name.toLowerCase() + '|' + tracks;
@@ -2172,10 +2238,10 @@
       n++;
       return code + ' - ' + m[2];
     };
-    document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { const v = swap(el.value); if (v !== el.value) setVal(el, v); });
+    document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { if (isHeadRow(el)) return; const v = swap(el.value); if (v !== el.value) setVal(el, v); });
     const adv = $('#track_advanced');
     if (adv && adv.value) {
-      const v = adv.value.split('\n').map((l) => { const p = l.split('|'); if (p.length > 1) p[1] = swap(p[1]); return p.join('|'); }).join('\n');
+      const v = adv.value.split('\n').map((l) => { const p = l.split('|'); if (p.length > 1 && p[0].trim() && !/^\s*\[b\]/i.test(p[1])) p[1] = swap(p[1]); return p.join('|'); }).join('\n');
       if (v !== adv.value) setVal(adv, v);
     }
     return n;
@@ -2183,6 +2249,7 @@
   // V/A and similar: 🔍 next to every artist still in plain text in the tracklist (Simple view)
   let pendingTrack = null, decorating = false, trackObs = null;
   const SEP = /(\s*(?:&|,|\s+and\s+|\s+vs\.?\s+|\s+x\s+)\s*)/i;
+  const isHeadRow = (el) => /^\s*\[b\]/i.test(el.value || '') || !((document.getElementById(el.id.replace('title', 'number')) || {}).value || '').trim();
   function replaceTrackArtist(name, code) {
     const key = nameKey(name);
     let n = 0;
@@ -2196,10 +2263,10 @@
       n++;
       return out + ' - ' + m[2];
     };
-    document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { const v = swap(el.value); if (v !== el.value) setVal(el, v); });
+    document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { if (isHeadRow(el)) return; const v = swap(el.value); if (v !== el.value) setVal(el, v); });
     const adv = $('#track_advanced');
     if (adv && adv.value) {
-      const v = adv.value.split('\n').map((l) => { const p = l.split('|'); if (p.length > 1) p[1] = swap(p[1]); return p.join('|'); }).join('\n');
+      const v = adv.value.split('\n').map((l) => { const p = l.split('|'); if (p.length > 1 && p[0].trim() && !/^\s*\[b\]/i.test(p[1])) p[1] = swap(p[1]); return p.join('|'); }).join('\n');
       if (v !== adv.value) setVal(adv, v);
     }
     decorateTracks();
@@ -2211,6 +2278,8 @@
     try {
       document.querySelectorAll('.drym_tl').forEach((x) => x.remove());
       document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => {
+        // section lines ("[b]Love & Liberty - A Cantata[/b]") and lines without a number: no magnifier
+        if (isHeadRow(el)) return;
         const m = String(el.value || '').match(/^(.+?)\s+-\s+.+$/);
         if (!m) return;
         m[1].split(SEP).filter((p, i) => i % 2 === 0 && p.trim() && !/^\[Artist\d+\]$/.test(p.trim())).forEach((name) => {
