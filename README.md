@@ -8,8 +8,8 @@ It never submits anything by itself: you check the form, press Preview and submi
 
 ## What it fills in
 
-- **Release type**: album, EP, single, compilation, DJ mix, mixtape, additional release, video, music video... An "EP" stated in the title or by the source wins; club 12"s with 4-6 long tracks stay EPs up to 45 minutes. On Various Artists releases, "Compilation" is used only for previously released material (the Discogs tag alone is not trusted on 3-4 track releases). When the source gives no clear info, the type is an estimate (see **Details**).
-- **Category**: single artist, split (2-4 artists, each track with its own artist), collaboration (2-4 artists who made the tracks together) or Various Artists (5 or more). It starts the search for the first artist and, when there are several, adds a search button for each of the others (the button disappears once clicked).
+- **Release type**: album, EP, single, compilation, DJ mix, mixtape, additional release, video, music video... An "EP" stated in the title or by the source wins; club 12"s with 4-6 long tracks stay EPs up to 45 minutes. On Various Artists releases, "Compilation" is used only for previously released material (the Discogs tag alone is not trusted on 3-4 track releases). "Mixed" means DJ mix only when the tracks are by different artists; a single-artist record that flows without breaks stays an album. When the source gives no clear info, the type is an estimate (see **Details**).
+- **Category**: single artist, split (2-4 artists, each track with its own artist), collaboration (2-4 artists who made the tracks together) or Various Artists (5 or more). A release filed under its compiler or presenter ("Presenter", "Compiled By", "Selected By" in the credits) with tracks by other artists is a Various Artists release: the compiler goes in the credits and "Selector Comp" is ticked. It starts the search for the first artist and, when there are several, adds a search button for each of the others (the button disappears once clicked).
 - **Date, title, format and disc size** (also non-standard sizes). It warns about dates that are impossible for the format (a CD before 1982, a digital release before 2000) and about dates that look like the © year.
 - **Localized English title** for titles in a non-Latin script, when Discogs gives a translation (`Original = Translation`).
 - **Label**: the most specific one, skipping label groups and distributors, as Rym asks.
@@ -20,12 +20,12 @@ It never submits anything by itself: you check the form, press Preview and submi
 - **Recording date**, only when the source states it ("Recorded at..." in the notes, or the date in the title of a live release; primary issue only).
 - **Tracklist**:
   - Rym positions (`CD.1` → `1`, `1-1` → `1.1`, `AA` → `B`, `A01` → `A1`, roman `i`, `ii` → `1`, `2` on CDs); parallel grooves are left as they are
-  - lines without a number for suites, works and sections, in bold (`[b]...[/b]`)
+  - lines without a number for suites, works and sections, in bold (`[b]...[/b]`); in box sets, sub-tracks numbered like `13.1` stay `13.1`
   - a `CD` / `DVD` line before each medium
   - `Digital Bonus Tracks` header with its own numbering
   - untitled tracks as `[untitled]`; rows without audio removed
   - "(Original Mix)" and "feat. ..." removed from titles (featured artists go in the credits)
-  - on splits and Various Artists releases: `Artist - Title`, with several artists written `A & B` or `A, B & C`; on splits, as soon as you pick an artist in "File under", its name in the tracklist becomes the Rym code (`[Artist123] - Title`); on Various Artists releases a 🔍 next to each artist in the tracklist searches it in the credits box, and the result you pick is linked in all its tracks (no credit line is added)
+  - `Artist - Title` whenever the tracks have their own artists (splits, Various Artists, compilations), with several artists written `A & B` or `A, B & C`; on Discogs, artists missing from the API are read from the page; on splits, as soon as you pick an artist in "File under", its name in the tracklist becomes the Rym code (`[Artist123] - Title`); on Various Artists releases a 🔍 next to each artist in the tracklist searches it in the credits box, and the result you pick is linked in all its tracks (no credit line is added)
 - **Text**: straight apostrophes and quotes, plain hyphens, round brackets, `Vol. 1` (not `Vol.1`), no invisible or "decorative" characters.
 - **Capitalization**: Rym rules for English titles (slang like `da` for "the" included), first letter only for other languages, with the special rules for Turkish, Indonesian, Filipino, French, Dutch and Russian. German and non-Latin scripts are left as they are. Titles of the same record follow the same rules. In Italian titles, common proper names (regions, cities, countries, first names) and the names in the credits stay capitalized. You can switch the mode with a checkbox.
 - **Sources**: the Discogs or Bandcamp link.
@@ -34,7 +34,7 @@ It never submits anything by itself: you check the form, press Preview and submi
 
 Uncertain choices are never applied by themselves: they appear as buttons, and you click only the ones you agree with. Short notes stay in **Details**, closed by default. Checking the form is up to you.
 
-- **Credit lines** with the official Rym roles (`Mastered By` → `mastering engineer`, `Vocals [Backing]` → `backing vocals`; `Written-By` stays `writer` for electronic music) and tracks (`A1 to B3` → `A1-A6, B1-B3`), featured and guest included. The same person with the same role on several tracks gets one line (`A, B`). Press 🔍 on a line to search the artist: when you click the result, the line becomes linked.
+- **Credit lines** with the official Rym roles (`Mastered By` → `mastering engineer`, `Vocals [Backing]` → `backing vocals`; `Written-By` stays `writer` for electronic music) and tracks (`A1 to B3` → `A1-A6, B1-B3`), featured and guest included. The same person with the same role on several tracks gets one line (`A, B`). Credits for whole discs (`Vol. 1 & 2`, `CD 3-12`) become one range per disc (`1.1-1.23, 2.1-2.28`). Press 🔍 on a line to search the artist: when you click the result, the line becomes linked.
 - **Credited name** with "featuring" / "with" or a name variation.
 - **Edition name** (for example `30th Anniversary Edition`), only for secondary issues.
 - **Languages** of the lyrics, estimated from the titles.
