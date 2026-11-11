@@ -3,13 +3,6 @@
 // @namespace    postino-rym-en
 // @version      1.2.0
 // @description  Brings the data of a Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music or Deezer release into the Rateyourmusic "Add Release" form, following the Rym rules. It never submits anything: preview and submit stay with you.
-// @match        https://www.discogs.com/*
-// @match        https://*.bandcamp.com/*
-// @match        https://www.beatport.com/*
-// @match        https://musicbrainz.org/*
-// @match        https://beta.musicbrainz.org/*
-// @match        https://music.apple.com/*
-// @match        https://www.deezer.com/*
 // @match        https://rateyourmusic.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -20,6 +13,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // @connect      api.discogs.com
+// @connect      www.discogs.com
 // @connect      bandcamp.com
 // @connect      www.beatport.com
 // @connect      musicbrainz.org
@@ -29,7 +23,7 @@
 // ==/UserScript==
 
 // Postino 1.2.0 — Discogs / Bandcamp / Beatport / MusicBrainz / Apple Music / Deezer → Rateyourmusic
-// How to use: on a Discogs, Beatport, MusicBrainz, Apple Music, Deezer release or a Bandcamp album press "→ Rym" (bottom right);
+// How to use: on the Rym "Add release" page paste the release link in the panel (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer);
 // then, on the Rym "Add release" page, press "Fill form" in the panel and check the form.
 
 (function () {
@@ -58,13 +52,6 @@
     return b;
   }
 
-  function floatingButton(onClick) {
-    const b = btn('→ Rym', onClick, '#c0392b');
-    css(b, { position: 'fixed', bottom: '20px', right: '20px', zIndex: 99999, padding: '10px 16px', fontSize: '15px', boxShadow: '0 2px 6px rgba(0,0,0,.4)' });
-    document.body.appendChild(b);
-    return b;
-  }
-
   // save the data and open Rym on the right search
   // Temporary notice at the bottom right (green = ok, red = error)
   function toast(msg, ok = true) {
@@ -82,7 +69,6 @@
   function sendToRym(data) {
     data.savedAt = Date.now(); // makes every send different from the previous one (needed for the live update on Rym)
     GM_setValue(KEY, JSON.stringify(data));
-    toast('✔ Data saved – ' + data.artist + ' – ' + data.title);
   }
 
   // seconds -> "m:ss" (or "h:mm:ss" past one hour); 0 or empty -> ''
@@ -851,122 +837,22 @@
     });
     const loc = { origin: u.origin, pathname: u.pathname, href: u.href, hash: u.hash };
     let m;
-    if (h.endsWith('discogs.com') && (m = u.pathname.match(/\/(release|master)\/(\d+)/))) return discogsFetch(m[1], m[2], null, done, fail);
+    // Discogs: API + release page (sub-track artists the API lacks); without the page it goes on with the API only
+    if (h.endsWith('discogs.com') && (m = u.pathname.match(/\/(release|master)\/(\d+)/))) {
+      const kind = m[1], id = m[2];
+      if (kind === 'master') return discogsFetch(kind, id, null, done, fail);
+      return GM_xmlhttpRequest({
+        method: 'GET', url: 'https://www.discogs.com/release/' + id,
+        onload: (r) => { let doc = null; try { if (r.status === 200) doc = new DOMParser().parseFromString(r.responseText, 'text/html'); } catch (e) { doc = null; } discogsFetch(kind, id, doc && doc.getElementById('dsdata') ? doc : null, done, fail); },
+        onerror: () => discogsFetch(kind, id, null, done, fail)
+      });
+    }
     if (h.endsWith('bandcamp.com') && /^\/(album|track)\//.test(u.pathname)) return page((html, doc) => done(normalizeBandcamp(doc, loc)));
     if (h === 'beatport.com' && /\/release\//.test(u.pathname)) return page((html) => { const nd = nextData(html); if (!nd) throw new Error(say('dati non trovati', 'data not found')); done(normalizeBeatport(nd)); });
     if (/(^|\.)musicbrainz\.org$/.test(h) && /^\/release\/[0-9a-f-]{36}/.test(u.pathname)) return page((html, doc) => done(normalizeMB(doc, loc)));
     if (h === 'music.apple.com' && /\/album\//.test(u.pathname)) return page((html, doc) => done(normalizeApple(doc, loc)));
     if (h === 'deezer.com' && /\/album\/\d+/.test(u.pathname)) return page((html, doc) => done(normalizeDeezer(doc, loc)));
     return fail(say('sito non supportato (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer)', 'site not supported (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer)'));
-  }
-
-  // =====================================================================
-  //  DISCOGS SIDE
-  // =====================================================================
-  if (host.endsWith('discogs.com')) {
-    const b = floatingButton(onDiscogsClick);
-    b.style.display = 'none';
-
-    // Discogs is a SPA: show the button only on release pages
-    setInterval(() => {
-      b.style.display = /\/(release|master)\/\d+/.test(location.pathname) ? 'block' : 'none';
-    }, 800);
-
-
-    // every click gets a number: responses from an earlier click are ignored
-    let reqId = 0;
-    function onDiscogsClick() {
-      const my = ++reqId;
-      const live = () => my === reqId;
-      const m = location.pathname.match(/\/(release|master)\/(\d+)/);
-      if (!m) return toast(say('Apri una pagina release (o master) di Discogs.', 'Open a Discogs release (or master) page.'), false);
-      b.textContent = say('Carico…', 'Loading…');
-      const fail = (why) => { if (!live()) return; b.textContent = '→ Rym'; toast(say('Errore API Discogs: ', 'Discogs API error: ') + why, false); };
-      discogsFetch(m[1], m[2], document, (data) => { b.textContent = '→ Rym'; sendToRym(data); }, fail, live);
-    }
-
-    return;
-  }
-
-  // =====================================================================
-  //  BANDCAMP SIDE (no API: reads the data already in the page)
-  // =====================================================================
-  if (host.endsWith('bandcamp.com')) {
-    if (!/^\/(album|track)\//.test(location.pathname)) return;
-    const b = floatingButton(() => {
-      try {
-        sendToRym(normalizeBandcamp(document, location));
-      } catch (e) {
-        toast('Can\'t read the data on this Bandcamp page. ' + e.message, false);
-      }
-    });
-    b.title = 'Send this release to the Rym form';
-
-
-
-    return;
-  }
-
-  // =====================================================================
-  // BEATPORT SIDE
-  // =====================================================================
-  // The release data is in the page (Next.js __NEXT_DATA__ block): no external calls
-  if (host.endsWith('beatport.com')) {
-    const relId = () => (location.pathname.match(/\/release\/[^/]+\/(\d+)/) || [])[1] || '';
-    const b = floatingButton(onBeatportClick);
-    b.style.display = 'none';
-    b.title = say('Invia questa release al modulo Rym', 'Send this release to the Rym form');
-    // Beatport is a SPA: button only on release pages
-    setInterval(() => { b.style.display = relId() ? 'block' : 'none'; }, 800);
-
-    function onBeatportClick() {
-      const id = relId();
-      const nd = nextData();
-      const ok = (d) => {
-        try { sendToRym(normalizeBeatport(d)); } catch (e) { toast(say('Non riesco a leggere i dati di questa pagina Beatport. ', 'Can\'t read the data on this Beatport page. ') + e.message, false); }
-      };
-      // after an in-app navigation the page block is stale: the page is read again
-      if (nd && String(nd.props?.pageProps?.release?.id) === id) return ok(nd);
-      fetch(location.href, { credentials: 'same-origin' }).then((r) => r.text()).then((h) => {
-        const d = nextData(h);
-        if (!d || String(d.props?.pageProps?.release?.id) !== id) throw new Error(say('Dati release non trovati.', 'Release data not found.'));
-        ok(d);
-      }).catch((e) => toast(say('Non riesco a leggere i dati di questa pagina Beatport. ', 'Can\'t read the data on this Beatport page. ') + e.message, false));
-    }
-
-    return;
-  }
-
-
-  // =====================================================================
-  //  MUSICBRAINZ SIDE (reads the release page data: tracks, credits, works and composers)
-  // =====================================================================
-  if (/(^|\.)musicbrainz\.org$/.test(host)) {
-    if (!/^\/release\/[0-9a-f-]{36}(\/?$|\/?#)/.test(location.pathname + location.hash)) return;
-    floatingButton(() => {
-      try { sendToRym(normalizeMB(document, location)); } catch (e) { toast(say('Non riesco a leggere i dati di questa pagina MusicBrainz. ', 'Can\'t read the data on this MusicBrainz page. ') + e.message, false); }
-    });
-    return;
-  }
-
-  // =====================================================================
-  //  APPLE MUSIC AND DEEZER SIDE (single-page sites: the page is read again when the data is stale)
-  // =====================================================================
-  if (host === 'music.apple.com' || host === 'www.deezer.com') {
-    const apple = host === 'music.apple.com';
-    const onAlbum = () => (apple ? /\/album\//.test(location.pathname) : /\/album\/\d+/.test(location.pathname));
-    const b = floatingButton(() => {
-      const read = (doc) => (apple ? normalizeApple(doc, location) : normalizeDeezer(doc, location));
-      const fail = (e) => toast(say('Non riesco a leggere i dati di questa pagina. ', 'Can\'t read the data on this page. ') + (e && e.message || e), false);
-      if (typeof fetch !== 'function') { try { sendToRym(read(document)); } catch (e) { fail(e); } return; }
-      fetch(location.href, { credentials: 'same-origin' }).then((r) => r.text()).then((h) => {
-        try { sendToRym(read(new DOMParser().parseFromString(h, 'text/html'))); } catch (e) { try { sendToRym(read(document)); } catch (e2) { fail(e2); } }
-      }).catch(() => { try { sendToRym(read(document)); } catch (e) { fail(e); } });
-    });
-    b.style.display = 'none';
-    b.title = say('Invia questa release al modulo Rym', 'Send this release to the Rym form');
-    setInterval(() => { b.style.display = onAlbum() ? 'block' : 'none'; }, 800);
-    return;
   }
 
   // =====================================================================
@@ -2908,7 +2794,12 @@
         if (tracks) x.tracks.push(tracks); else x.all = true;
       });
     };
-    (D.creditList || []).forEach((c) => {
+    // several people in one name ("Nile Rodgers, Bernard Edwards", as Deezer and Apple Music give them): one line per person; groups are not split ("Earth, Wind & Fire", "Bob Marley & The Wailers")
+    const people = (n) => {
+      const p = String(n || '').split(/\s*,\s*|\s+&\s+|\s+and\s+|\s*\/\s*|\s*;\s*/).map((x) => x.trim()).filter(Boolean);
+      return p.length >= 2 && p.every((x) => /\S\s+\S/.test(x) && !/^the\s/i.test(x)) ? p : [n];
+    };
+    (D.creditList || []).flatMap((c) => people(c.name).map((name) => Object.assign({}, c, { name }))).forEach((c) => {
       const tracks = rymTracks(c.tracks, T);
       c.role.split(/,\s*(?![^\[]*\])/).forEach((r) => {
         // classical: composition roles go on the works; the other roles of the same person stay
@@ -3719,6 +3610,7 @@
     if ((D.labels || []).length > 1) { todo.push('Several labels on Discogs: pick one'); }
 
     filledRaw = rawSeen;
+    try { GM_setValue(KEY + '_used', D.savedAt || 0); } catch (e) { /* - */ }
     settingsChanged = false;
     renderPanel();
     // only one title proposed, to avoid confusion
@@ -3737,22 +3629,28 @@
 
   // (Re)draws the panel with the current release; reopens it if it was closed
   // "Import from link": paste the URL of a release (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer) without opening it
+  // a single "Fill form" button: with a link in the field it first imports the release, then fills
   function importRow() {
     const row = css(document.createElement('div'), { margin: '6px 3px 2px', display: 'flex', gap: '4px' });
-    row.innerHTML = '<input id="drym_link" type="text" placeholder="' + esc(say('Importa da link…', 'Import from link…')) + '" style="flex:1;min-width:0;font-size:12px;padding:3px">';
+    row.innerHTML = '<input id="drym_link" type="text" placeholder="' + esc(say('Link della release (Discogs, Bandcamp…)', 'Release link (Discogs, Bandcamp…)')) + '" style="flex:1;min-width:0;font-size:12px;padding:3px">';
     const inp = row.querySelector('input');
+    const label = say('Compila modulo', 'Fill form');
     const go = () => {
       const v = inp.value.trim();
-      if (!v) return;
+      if (!v) {
+        if (D) return fill();
+        return toast(say('Incolla il link di una release', 'Paste the link of a release'), false);
+      }
       b2.textContent = '…';
       importFromLink(v, (data) => {
-        b2.textContent = say('Importa', 'Import');
+        b2.textContent = label;
         sendToRym(data);
         onNewData(GM_getValue(KEY));
         if (!panel.isConnected) document.body.appendChild(panel);
-      }, (why) => { b2.textContent = say('Importa', 'Import'); toast(say('Importazione non riuscita: ', 'Import failed: ') + why, false); });
+        fill();
+      }, (why) => { b2.textContent = label; toast(say('Importazione non riuscita: ', 'Import failed: ') + why, false); });
     };
-    const b2 = btn(say('Importa', 'Import'), go, '#2a6fdb');
+    const b2 = btn(label, go, '#27ae60');
     css(b2, { margin: '0' });
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
     row.appendChild(b2);
@@ -3775,7 +3673,7 @@
       '<div><b>' + esc(D.artist) + '</b> – ' + esc(D.title) + '</div>' +
       '<div>' + esc([D.year, D.formatName === 'File' ? 'Digital' : D.formatName, (D.descriptions || []).join(', ')].filter(Boolean).join(' · ')) + '</div>' +
       '<div>' + esc([lab0.name, lab0.catno, D.country].filter(Boolean).join(' · ')) + '</div>' +
-      '<div style="opacity:.7">' + (D.tracks || []).filter((t) => !t.header).length + ' tracks' + (when ? ' · sent at ' + when : '') + '</div>' +
+      '<div style="opacity:.7">' + (D.tracks || []).filter((t) => !t.header).length + ' tracks' + (when ? ' · imported at ' + when : '') + '</div>' +
       // the checkboxes prepare the data without touching the form: they apply with "Fill form"
       (filledRaw && settingsChanged && filledRaw === rawSeen ? banner(say('Impostazioni cambiate: premi "Compila modulo" per applicarle (le tue correzioni a mano verranno sostituite).', 'Settings changed: press "Fill form" to apply them (your manual corrections will be replaced).'), '#2a6fdb') : '') +
       (filledRaw && filledRaw !== rawSeen ? banner('New release loaded. Press "Fill form" to replace the data of the previous one.', '#2a6fdb') : '') +
@@ -3787,7 +3685,6 @@
     watchCredited();
     panel.insertBefore(importRow(), bar);
     panel.querySelector('#drym_x').addEventListener('click', () => panel.remove());
-    bar.appendChild(btn('Fill form', fill, '#27ae60'));
     if (other) bar.appendChild(btn('Search "' + D.artistSearch + '" on Rym', () => GM_openInTab('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent(D.artistSearch) + '&searchtype=a', { active: true }), '#b03a2e'));
     if (D.artUrl) bar.appendChild(btn(say('Copertina originale', 'Original cover'), () => GM_openInTab(D.artUrl, { active: true }), '#2a6fdb'));
     if (D.physicalApplied) bar.appendChild(btn(say('Torna al digitale', 'Back to digital'), () => { rawSeen = null; D = null; loadData(); renderPanel(); }, '#555'));
@@ -3798,7 +3695,7 @@
     const opts = [['auto', 'Auto'], ['en', say('Inglese', 'English')], ['other', say('Altra lingua', 'Other language')], ['keep', say('Come sulla fonte', 'As on source')]];
     const sel = (id, val) => '<select id="' + id + '" style="font-size:11px;margin:0 6px 0 3px">' + opts.map(([v, l]) => '<option value="' + v + '"' + (v === val ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select>';
     capRow.title = say('Auto: titolo per titolo secondo la lingua. Altra lingua: solo iniziale (tedesco: sostantivi maiuscoli). Come sulla fonte: solo per grafie ufficiali ammesse dalla wiki.', 'Auto: title by title by language. Other language: first letter only (German: capitalized nouns). As on source: only for official stylings allowed by the wiki.');
-    capRow.innerHTML = esc(say('Maiuscole – titolo', 'Caps – title')) + sel('drym_capt', capsTitle) + esc('tracklist') + sel('drym_capr', capsTracks);
+    capRow.innerHTML = esc(say('Maiuscole – titolo', 'Caps – title')) + sel('drym_capt', capsTitle) + '<br>' + esc('Tracklist') + sel('drym_capr', capsTracks);
     capRow.querySelector('#drym_capt').addEventListener('change', (e) => { capsTitle = e.target.value; settingsChanged = true; renderPanel(); });
     capRow.querySelector('#drym_capr').addEventListener('change', (e) => { capsTracks = e.target.value; settingsChanged = true; renderPanel(); });
     bar.appendChild(capRow);
@@ -3836,6 +3733,11 @@
   window.addEventListener('focus', () => onNewData());
   document.addEventListener('visibilitychange', () => { if (!document.hidden) onNewData(); });
   window.addEventListener('pageshow', (e) => { if (e.persisted) onNewData(); });
+  // on every page load: drop the data already used for a fill or older than 30 minutes (clean panel, no warnings from the previous record)
+  try {
+    const p0 = JSON.parse(GM_getValue(KEY) || 'null');
+    if (p0 && ((p0.savedAt && p0.savedAt === GM_getValue(KEY + '_used')) || Date.now() - (p0.savedAt || 0) > 30 * 60 * 1000)) GM_deleteValue(KEY);
+  } catch (e) { GM_deleteValue(KEY); }
   onNewData();
   if (!D) renderPanel();
 
