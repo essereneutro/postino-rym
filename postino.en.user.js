@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         Postino
 // @namespace    postino-rym-en
-// @version      1.1.0
-// @description  Brings the data of a Discogs, Bandcamp or Beatport release into the Rateyourmusic "Add Release" form, following the Rym rules. It never submits anything: preview and submit stay with you.
+// @version      1.2.0
+// @description  Brings the data of a Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music or Deezer release into the Rateyourmusic "Add Release" form, following the Rym rules. It never submits anything: preview and submit stay with you.
 // @match        https://www.discogs.com/*
 // @match        https://*.bandcamp.com/*
 // @match        https://www.beatport.com/*
+// @match        https://musicbrainz.org/*
+// @match        https://beta.musicbrainz.org/*
+// @match        https://music.apple.com/*
+// @match        https://www.deezer.com/*
 // @match        https://rateyourmusic.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -16,11 +20,16 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // @connect      api.discogs.com
+// @connect      bandcamp.com
+// @connect      www.beatport.com
+// @connect      musicbrainz.org
+// @connect      music.apple.com
+// @connect      www.deezer.com
 // @run-at       document-idle
 // ==/UserScript==
 
-// Postino 1.1.0 — Discogs / Bandcamp / Beatport → Rateyourmusic
-// How to use: on a Discogs or Beatport release or a Bandcamp album press "→ Rym" (bottom right);
+// Postino 1.2.0 — Discogs / Bandcamp / Beatport / MusicBrainz / Apple Music / Deezer → Rateyourmusic
+// How to use: on a Discogs, Beatport, MusicBrainz, Apple Music, Deezer release or a Bandcamp album press "→ Rym" (bottom right);
 // then, on the Rym "Add release" page, press "Fill form" in the panel and check the form.
 
 (function () {
@@ -91,6 +100,767 @@
   }
 
   // =====================================================================
+  //  SOURCE READERS (used by the source pages and by "Import from link")
+  // =====================================================================
+  function getJSON(url, ok, ko) {
+    GM_xmlhttpRequest({
+      method: 'GET', url, headers: { Accept: 'application/json' },
+      onload: (r) => {
+        if (r.status !== 200) return ko(r.status);
+        let j; try { j = JSON.parse(r.responseText); } catch (e) { return ko('JSON'); }
+        ok(j);
+      },
+      onerror: () => ko(say('rete', 'network'))
+    });
+  }
+
+  function normalizeDiscogs(d, doc) {
+    // Artist
+    let artist = '';
+    (d.artists || []).forEach((a) => {
+      artist += clean(a.anv || a.name);
+      if (a.join) artist += a.join === ',' ? ', ' : ' ' + a.join + ' ';
+    });
+    artist = artist.trim();
+
+    // Date
+    const [y, mo, da] = (d.released || String(d.year || '')).split('-');
+
+    // Format: skip containers ("Box Set", "All Media") and take the first real medium
+    const media = (d.formats || []).filter((x) => !['Box Set', 'All Media'].includes(x.name));
+    const f = media[0] || (d.formats || [])[0] || {};
+
+    // Tracks. Works in several movements (Discogs "index tracks") become, as on Rym,
+    // a header line without a number (the title of the work) followed by the movements.
+    // Section headings ("Live Recordings", the name of a work…) also become lines without a number;
+    // only generic side headings ("Side A") and untitled media headings ("CD 1", "DVD") are skipped.
+    const classical = (d.genres || []).includes('Classical');
+    const SIDE_HEADING = /^(side|face|lato)\s*[a-z0-9]+\.?$|^[a-z]\d*$|^\d+$/i;
+    const PLAIN_MEDIA_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|disc|disk|lp|vinyl|cassette|tape|record|vhs)\s*[-.:#]?\s*\d*\.?$/i;
+    const MEDIA_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|disc|disk|vhs)\b/i; // e.g. 'DVD "Concerto Live"'
+    const pipe = (s) => (s || '').replace(/\|/g, '/');
+    // track artist (V/A compilations): "Adham Zahran", "A & B", "A feat. B"
+    const artistOf = (list) => {
+      let a = '';
+      (list || []).forEach((x) => { a += clean(x.anv || x.name); if (x.join) a += x.join === ',' ? ', ' : ' ' + x.join + ' '; });
+      return pipe(a.trim());
+    };
+    const namesOf = (list) => (list || []).map((x) => clean(x.name)).filter((x) => x && !isVarious(x));
+    // the API sometimes omits sub-track artists: they are taken from the Discogs page data (same release)
+    const pageArtists = new Map();
+    try {
+      const ds = JSON.parse(doc && doc.getElementById('dsdata') ? doc.getElementById('dsdata').textContent : 'null').data || {};
+      if (Object.keys(ds).some((k) => k === 'Release:{"discogsId":' + d.id + '}')) {
+        Object.values(ds).forEach((v) => {
+          if (!v || !/^(Sub)?Track$/.test(v.__typename || '') || !(v.primaryArtists || []).length) return;
+          const list = v.primaryArtists.map((a) => ({ name: a.displayName || '', anv: a.nameVariation || '', join: a.joiningText || '' }));
+          pageArtists.set((v.position || '').trim() + '|' + (v.title || '').trim(), list);
+        });
+      }
+    } catch (e) { /* pagina senza dati: si usa solo l'API || page without data: only the API is used */ }
+    const subArtists = (s, t) => ((s.artists || []).length ? s.artists : pageArtists.get((s.position || '').trim() + '|' + (s.title || '').trim()) || t.artists);
+    // "disc.track" positions used by the regular tracks: "13.1" sub-tracks are tracks of disc 13, not movements
+    const discPrefixes = new Set((d.tracklist || []).filter((t) => t.type_ === 'track').map((t) => ((t.position || '').trim().match(/^(\d+)[.-]\d+$/) || [])[1]).filter(Boolean));
+    let n = 0;
+    const tracks = [];
+    // all-different capital letters in the sub-tracks (A, B… P of 78s): they are sides, not sub-tracks
+    const subLetters = (d.tracklist || []).flatMap((t) => (t.type_ === 'index' ? t.sub_tracks || [] : [])).map((x) => (x.position || '').trim()).filter((p) => /^[A-Z]$/.test(p));
+    const letterSides = subLetters.length > 1 && new Set(subLetters).size === subLetters.length;
+    const subLetter = (p) => /^[a-z]$/i.test(p) && !(letterSides && /^[A-Z]$/.test(p));
+    // medium given by the headings ("CD 1", "DVD"): passed on to the following tracks
+    let curMedia = null;
+    const OPTICAL_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|vhs)\s*[-.:#]?\s*(\d*)\.?(?:\s|$)/i;
+    const hint = (row) => { if (curMedia) { row.mediaHint = curMedia.label; if (curMedia.disc) row.discHint = curMedia.disc; } return row; };
+    (d.tracklist || []).forEach((t) => {
+      if (t.type_ === 'heading') {
+        const h = (t.title || '').trim();
+        const om = h.match(OPTICAL_HEADING);
+        // CD/DVD: the medium stays with the tracks; other media (LP, cassette, "Disc") clear the information
+        if (om) curMedia = { label: om[1], disc: om[2] || '' };
+        else if (PLAIN_MEDIA_HEADING.test(h) || MEDIA_HEADING.test(h)) curMedia = null;
+        if (!h || SIDE_HEADING.test(h) || PLAIN_MEDIA_HEADING.test(h)) return;
+        const row = { pos: '', title: pipe(h), dur: '', header: true };
+        if (MEDIA_HEADING.test(h)) row.mediaHeading = true; // replaced by the "CD"/"DVD" line when there are several media
+        tracks.push(row);
+        return;
+      }
+      if (t.type_ === 'index' && Array.isArray(t.sub_tracks) && t.sub_tracks.length) {
+        tracks.push({ pos: '', title: pipe(t.title), dur: '', header: true });
+        // number of the work: from the index field, from "3.1" / "3.a" sub-tracks, otherwise the next free number
+        const dotted = (p) => (p || '').trim().match(/^(.+?)[.\-](\d+|[a-z])$/i);
+        const firstDot = t.sub_tracks.map((x) => dotted(x.position)).find(Boolean);
+        let work = (t.position || '').trim() || (firstDot ? firstDot[1] : '');
+        const needRun = !work && t.sub_tracks.some((x) => !(x.position || '').trim() || subLetter((x.position || '').trim()));
+        if (needRun) { n++; work = String(n); }
+        t.sub_tracks.forEach((s, k) => {
+          if (!needRun) n++;
+          const sp = (s.position || '').trim();
+          const letter = String.fromCharCode(97 + k);
+          // "3.1", "3.a", "a" or empty -> "3a", "3b"…; already distinct positions ("4", "B2", "3a") stay
+          const discTrack = !(t.position || '').trim() && /^(\d+)[.-]\d+$/.test(sp) && discPrefixes.has(sp.match(/^(\d+)/)[1]);
+          const pos = discTrack ? sp : (!sp || dotted(sp) || subLetter(sp)) && work ? work + letter : (sp || String(n));
+          const sa = subArtists(s, t);
+          tracks.push(hint({ pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(sa), artists: namesOf(sa) }));
+        });
+        return;
+      }
+      if (t.type_ === 'track' || t.type_ === 'index') {
+        n++;
+        tracks.push(hint({ pos: (t.position || String(n)).trim(), title: pipe(t.title), dur: t.duration || '', artist: artistOf(t.artists), artists: namesOf(t.artists) }));
+      }
+    });
+
+    // full-resolution cover (primary image)
+    const img0 = (d.images || []).find((x) => x.type === 'primary') || (d.images || [])[0];
+    return {
+      source: 'Discogs',
+      artUrl: img0 && img0.uri ? img0.uri : '',
+      id: d.id,
+      url: 'https://www.discogs.com/release/' + d.id,
+      artist,
+      artistSearch: clean((d.artists || [])[0]?.name || artist),
+      title: d.title || '',
+      year: y && y !== '0000' ? y : '',
+      month: mo && mo !== '00' ? mo : '',
+      day: da && da !== '00' ? da : '',
+      labels: (d.labels || []).map((l) => ({ name: clean(l.name), catno: /^none$/i.test(l.catno || '') ? '' : (l.catno || ''), noCat: /^none$/i.test(l.catno || '') })),
+      country: d.country || '',
+      formatName: f.name || '',
+      boxSet: (d.formats || []).some((x) => x.name === 'Box Set'),
+      various: (d.artists || []).some((a) => isVarious(a.name)),
+      classical,
+      descriptions: (d.formats || []).flatMap((x) => x.descriptions || []),
+      // descriptions of the main medium (plus the Box Set/All Media container): they decide type and size
+      mainDescriptions: (d.formats || []).filter((x) => x === f || ['Box Set', 'All Media'].includes(x.name)).flatMap((x) => x.descriptions || []),
+      formatTexts: (d.formats || []).map((x) => x.text || '').filter(Boolean),
+      // free text of the vinyl/shellac media only (the colour of an included CD does not count)
+      vinylTexts: (d.formats || []).filter((x) => /vinyl|lathe|flexi|shellac/i.test(x.name || '')).map((x) => x.text || '').filter(Boolean),
+      tracks,
+      credits: (d.extraartists || []).map((c) => clean(c.anv || c.name) + ' – ' + c.role + (c.tracks ? ' (' + c.tracks + ')' : '')),
+      genres: d.genres || [],
+      styles: d.styles || [],
+      notes: d.notes || '',
+      bonusHeading: (d.tracklist || []).some((t) => t.type_ === 'heading' && /bonus/i.test(t.title || '')),
+      compiledBy: (d.extraartists || []).some((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks),
+      // who compiled/presented the collection (may also appear as the release artist)
+      compilers: (d.extraartists || []).filter((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks).map((c) => clean(c.name)),
+      // "feat." to add as featured credits on Rym (per track or for the whole release)
+      featured: [...new Set([
+        ...(d.tracklist || []).flatMap((t) => [t].concat(t.sub_tracks || []))
+          .flatMap((t) => (t.extraartists || []).filter((c) => /featuring/i.test(c.role || '')).map((c) => clean(c.anv || c.name) + (t.position ? ' (' + t.position + ')' : ''))),
+        ...(d.extraartists || []).filter((c) => /featuring/i.test(c.role || '')).map((c) => clean(c.anv || c.name) + (c.tracks ? ' (' + c.tracks + ')' : ''))
+      ])],
+      // performers (for classical music the Rym file under goes to them)
+      performers: [...new Set((d.extraartists || [])
+        .filter((c) => /conductor|orchestra|ensemble|choir|chorus|soloist|quartet|trio|violin|viola|cello|piano|soprano|tenor|baritone|mezzo|contralto|harpsichord|organ|guitar|flute|oboe|clarinet|bassoon|horn|trumpet|harp/i.test(c.role || ''))
+        .map((c) => clean(c.anv || c.name) + ' (' + c.role + ')'))],
+      // main artists with their joins ("&", "Feat.", "/")
+      artistsList: (d.artists || []).map((a) => ({ name: clean(a.name), anv: clean(a.anv || ''), join: (a.join || '').trim(), various: isVarious(a.name) })),
+      // structured credits: release-wide (with tracks field) and per track
+      creditList: (d.extraartists || []).map((c) => ({ name: clean(c.anv || c.name), role: c.role || '', tracks: c.tracks || '' }))
+        .concat((d.tracklist || []).flatMap((t) => [t].concat(t.sub_tracks || []))
+          .flatMap((t) => (t.extraartists || []).map((c) => ({ name: clean(c.anv || c.name), role: c.role || '', tracks: (t.position || '').trim() })))),
+      rightsSocieties: (d.identifiers || []).filter((x) => /rights society/i.test(x.type || '')).map((x) => x.value || ''),
+      depositoLegal: (d.identifiers || []).some((x) => /dep[oó]sito legal/i.test(x.type || '')),
+      companies: (d.companies || []).map((c) => ({ name: clean(c.name), role: c.entity_type_name || '' })),
+      series: (d.series || []).map((x) => clean(x.name) + (x.catno && !/^none$/i.test(x.catno) ? ' ' + x.catno : '')),
+      formatsAll: (d.formats || []).map((x) => ({ name: x.name || '', qty: x.qty || '1', descriptions: x.descriptions || [], text: x.text || '' }))
+    };
+  }
+
+  function readJsonLd(doc) {
+    for (const s of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const j = JSON.parse(s.textContent);
+        const t = [].concat(j['@type'] || []).join(' ');
+        if (/MusicAlbum|MusicRecording/.test(t)) return j;
+      } catch (e) { /* invalid block: ignore */ }
+    }
+    return null;
+  }
+
+  function readTralbum(doc) {
+    const el = doc.querySelector('[data-tralbum]');
+    if (!el) return null;
+    try { return JSON.parse(el.getAttribute('data-tralbum')); } catch (e) { return null; }
+  }
+
+  function normalizeBandcamp(doc, loc) {
+    const ld = readJsonLd(doc);
+    const tr = readTralbum(doc);
+    if (!ld && !tr) throw new Error(say('Dati album non trovati.', 'Album data not found.'));
+    const isTrack = loc.pathname.startsWith('/track/');
+
+    const title = (tr?.current?.title || ld?.name || '').trim();
+    const artist = (tr?.artist || ld?.byArtist?.name || '').trim();
+    if (!title || !artist) throw new Error(say('Titolo o artista mancanti.', 'Missing title or artist.'));
+
+    // Editions on sale: digital and physical (vinyl, CD, cassette) from schema.org
+    const releases = [].concat(ld?.albumRelease || ld?.inAlbum?.albumRelease || []).filter((x) => x && typeof x === 'object');
+    // Label: the "recordLabel" field first, then the publishing account if different from the artist
+    const labelOf = (x) => (x && x.recordLabel && x.recordLabel.name) || '';
+    const digitalRel = releases.find((x) => /DigitalFormat$/.test(String(x.musicReleaseFormat || '')));
+    const recordLabel = (labelOf(digitalRel) || releases.map(labelOf).find(Boolean) || '').trim();
+    const publisher = (ld?.publisher?.name || '').trim();
+    let labelName = recordLabel || (publisher && publisher.toLowerCase() !== artist.toLowerCase() ? publisher : '');
+    let labels = labelName && labelName.toLowerCase() !== artist.toLowerCase() ? [{ name: labelName, catno: '', noCat: false }] : [];
+
+    // Date, e.g. "15 Mar 2019 00:00:00 GMT"
+    const ymd = (v) => { const x = new Date(v || ''); return isNaN(x) ? null : [String(x.getUTCFullYear()), pad2(x.getUTCMonth() + 1), pad2(x.getUTCDate())]; };
+    let year = '', month = '', day = '', oldDate = '';
+    const rel = ymd(tr?.current?.release_date || tr?.album_release_date || ld?.datePublished);
+    // publish date: when the album appeared on Bandcamp (the release date is chosen by the artist)
+    const pub = ymd(tr?.current?.publish_date);
+    if (rel) {
+      [year, month, day] = rel;
+      // Bandcamp exists since 2008: an earlier date is the original release date, not the digital issue's.
+      // Rym: without a reliable source for the digital date, leave it blank.
+      if (+year < 2008) { oldDate = [year, month, day].join('-'); year = month = day = ''; }
+    }
+    const pubDate = pub ? pub.join('-') : '';
+    const relDate = rel ? rel.join('-') : '';
+    // published long after the release date: probably a digital reissue of an older release
+    const lateUpload = !!(rel && pub && (Date.parse(pubDate) - Date.parse(relDate)) > 45 * 864e5);
+
+    // Downloadable? (Rym: the Bandcamp issue is the downloadable version, lossless if available)
+    const tinfo = (tr && Array.isArray(tr.trackinfo)) ? tr.trackinfo : [];
+    let downloadable = null;
+    if (tr && tr.freeDownloadPage) downloadable = true;
+    else if (tinfo.some((t) => t.is_downloadable === true)) downloadable = true;
+    else if (tinfo.length && tinfo.every((t) => t.is_downloadable === false)) downloadable = false;
+
+    // Tracks: from the data-tralbum block first, otherwise from schema.org
+    let tracks = [];
+    if (tr && Array.isArray(tr.trackinfo) && tr.trackinfo.length) {
+      tracks = (isTrack ? tr.trackinfo.slice(0, 1) : tr.trackinfo).map((t, i) => ({ pos: isTrack ? '1' : String(t.track_num || i + 1), title: (t.title || '').replace(/\|/g, '/'), dur: secToTime(t.duration), artist: (t.artist || '').trim() }));
+    } else if (ld?.track?.itemListElement) {
+      tracks = ld.track.itemListElement.map((e, i) => ({ pos: String(e.position || i + 1), title: (e.item?.name || '').replace(/\|/g, '/'), dur: secToTime(isoToSec(e.item?.duration)) }));
+    } else if (isTrack && ld) {
+      tracks = [{ pos: '1', title: (ld.name || '').replace(/\|/g, '/'), dur: secToTime(isoToSec(ld.duration)) }];
+    }
+
+    // titles with position and artist in front ("A1 Ter Bandits : Calling Pete"): only the titles stay; the position matters only for vinyl and tape
+    const POS = /^\s*([A-Za-z]\d{1,2}|\d{1,2})(?:[.)]\s*|\s+-\s+|\s+)(?=\S)/;
+    if (tracks.length >= 2 && tracks.every((t) => POS.test(t.title))) tracks.forEach((t) => { t.sidePos = t.title.match(POS)[1].toUpperCase(); t.title = t.title.replace(POS, ''); });
+    const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const ART = new RegExp('^\\s*' + esc(artist) + '\\s*(?::|\\s-|\\s–)\\s+', 'i');
+    if (tracks.length && tracks.filter((t) => ART.test(t.title)).length >= Math.ceil(tracks.length / 2)) tracks.forEach((t) => { t.title = t.title.replace(ART, ''); });
+    // "Artist - Title" tracks (label compilations): artist and title split
+    const SEP_T = /^(.+?)\s+[-–—]\s+(.+)$/;
+    if (tracks.length >= 2 && tracks.filter((t) => !t.artist && SEP_T.test(t.title)).length >= Math.ceil(tracks.length * 0.8)) {
+      tracks.forEach((t) => { const m = !t.artist && t.title.match(SEP_T); if (m) { t.artist = m[1].trim(); t.title = m[2].trim(); } });
+    }
+    const keyOf = (x) => (x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    tracks.forEach((t) => { t.artists = (t.artist || '').split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean); });
+    const trackNames = [];
+    tracks.forEach((t) => t.artists.forEach((n) => { if (!trackNames.some((x) => keyOf(x) === keyOf(n))) trackNames.push(n); }));
+    const others = trackNames.filter((n) => keyOf(n) !== keyOf(artist));
+    // the page account is often the label: with different artists in the tracks it is a V/A (or split) by the label
+    const pageTitle = (tr?.current?.title || ld?.name || '');
+    const vaWords = /\b(various artists|v\/a)\b|(^|[\s\/|(\[-])va([\s)\]:|\/-]|$)/i.test(pageTitle + ' ' + artist);
+    const labelish = /\b(records?|recordings|sounds?|music|label|tapes|audio|editions?|productions?|imprint|collective)\b/i.test(artist);
+    let multi = false, realArtist = artist;
+    if (others.length >= 2 || (vaWords && trackNames.length >= 2)) multi = true;
+    else if (others.length === 1 && trackNames.length === 1 && (labelish || tracks.every((t) => t.artists.length))) realArtist = others[0];
+    // "Artist - Title [CAT]" title on a label account: the artist leaves the title, and is the artist
+    let relTitle = title;
+    const tm = !multi && title.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    if (tm) {
+      const X = tm[1].trim();
+      const catInTitle = /[\[(]\s*[A-Za-z]{2,8}[\s-]?\d{2,5}[A-Za-z]?\s*[\])]\s*$/.test(title);
+      if (keyOf(X) === keyOf(realArtist)) relTitle = tm[2].trim();
+      else if (keyOf(realArtist) === keyOf(artist) && !vaWords && (labelish || catInTitle || (trackNames.length === 1 && keyOf(trackNames[0]) === keyOf(X)))) { realArtist = X; relTitle = tm[2].trim(); }
+    }
+    if ((multi || realArtist !== artist) && !labels.length) labels = [{ name: artist, catno: '', noCat: false }];
+    // credits written in the text ("mastered by X", "artwork: Y") -> credit lines
+    const creditText = [doc.querySelector('.tralbum-credits') && doc.querySelector('.tralbum-credits').textContent, tr?.current?.credits].find(Boolean) || '';
+    const textCredits = [];
+    creditText.split(/\n|<br>|;/).map((l) => l.trim()).filter(Boolean).forEach((l) => {
+      const m = l.match(/^([A-Za-z][A-Za-z &/,'-]{2,40}?)\s+(?:by|:)\s+(.{2,80})$/i) || l.match(/^([A-Za-z][A-Za-z &/'-]{2,30}):\s*(.{2,80})$/);
+      if (!m) return;
+      const roles = m[1].split(/\s*(?:,|&|\/|\band\b)\s*/i).map((r) => r.trim()).filter(Boolean);
+      if (!roles.every((r) => r.split(/\s+/).length <= 3)) return;
+      const names = m[2].replace(/\s*\(.*?\)\s*/g, ' ').replace(/\s+(?:at|@|for|in)\s+.*$/i, '').split(/\s*(?:,|&|\band\b|\+)\s*/i).map((n) => n.trim()).filter((n) => n && n.length <= 40 && !/https?:|www\./i.test(n));
+      names.forEach((n) => roles.forEach((r) => textCredits.push({ name: n, role: r.charAt(0).toUpperCase() + r.slice(1) + (/ by$/i.test(r) ? '' : ' By'), tracks: '' })));
+    });
+
+    // track page that belongs to an album: not a standalone single
+    const partOfAlbum = isTrack && !!(tr?.album_url || (ld?.inAlbum && (ld.inAlbum.numTracks || 0) > 1));
+
+    // original artwork (_0 suffix = file uploaded by the artist, not the square preview)
+    const artId = tr?.art_id || tr?.current?.art_id || 0;
+    const artUrl = artId ? 'https://f4.bcbits.com/img/a' + String(artId).padStart(10, '0') + '_0.jpg' : '';
+
+    // embed code for Rym media links (albums only: Rym does not support Bandcamp tracks)
+    let embed = '';
+    try {
+      const em = JSON.parse(doc.querySelector('[data-embed]')?.getAttribute('data-embed') || 'null');
+      if (em && em.tralbum_param && em.tralbum_param.name === 'album') {
+        const href = loc.origin + loc.pathname;
+        embed = '<iframe style="border: 0; width: 350px; height: 470px;" src="https://bandcamp.com/EmbeddedPlayer/album=' + em.tralbum_param.value +
+          '/size=large/bgcol=ffffff/linkcol=0687f5/tracklist=false/transparent=true/" seamless><a href="' + href + '">' +
+          (em.album_title || title).replace(/[<>"]/g, '') + ' by ' + (em.artist || artist).replace(/[<>"]/g, '') + '</a></iframe>';
+      }
+    } catch (e) { /* - */ }
+
+    // physical editions: from schema.org and the "packages" block (fields read tolerantly)
+    const FORMAT_LD = { VinylFormat: 'Vinyl', CDFormat: 'CD', CassetteFormat: 'Cassette', DVDFormat: 'DVD' };
+    const pk = Array.isArray(tr?.packages) ? tr.packages : [];
+    const physical = releases.filter((x) => x.musicReleaseFormat && x.musicReleaseFormat !== 'DigitalFormat').map((x, i) => {
+      const p = pk[i] || {};
+      return {
+        format: FORMAT_LD[String(x.musicReleaseFormat).replace(/^.*\//, '')] || '',
+        name: (x.name || p.title || '').trim(),
+        type: (p.type_name || p.type_title || '').trim(),
+        desc: (x.description || p.description || '').trim(),
+        catno: (x.catalogNumber || p.catalog_number || p.sku || '').toString().trim(),
+        date: (ymd(p.release_date || p.new_date) || []).join('-'),
+        edition: p.edition_size || ''
+      };
+    });
+    if (!physical.length) pk.forEach((p) => physical.push({
+      format: /vinyl|record|lp\b|7"|10"|12"/i.test(p.type_name || p.title || '') ? 'Vinyl' : /cassette|tape/i.test(p.type_name || p.title || '') ? 'Cassette' : /\bcd\b|compact disc/i.test(p.type_name || p.title || '') ? 'CD' : '',
+      name: (p.title || '').trim(), type: (p.type_name || '').trim(), desc: (p.description || '').trim(),
+      catno: (p.catalog_number || p.sku || '').toString().trim(), date: (ymd(p.release_date || p.new_date) || []).join('-'), edition: p.edition_size || ''
+    }));
+
+    return {
+      source: 'Bandcamp',
+      url: loc.origin + loc.pathname,
+      artist: multi ? 'Various Artists' : realArtist,
+      artistSearch: multi ? '' : realArtist,
+      title: relTitle,
+      year, month, day,
+      labels,
+      creditList: textCredits,
+      country: '',
+      formatName: 'File',
+      boxSet: false,
+      various: multi || isVarious(artist),
+      descriptions: [],
+      formatTexts: [],
+      tracks,
+      credits: [],
+      typeHint: isTrack && !partOfAlbum ? 'i' : '',
+      // page tags (used to spot soundtracks) and "about"/"credits" texts
+      styles: [...doc.querySelectorAll('.tralbum-tags a, a.tag')].map((a) => a.textContent.trim()).filter(Boolean),
+      notes: [...doc.querySelectorAll('.tralbum-about, .tralbum-credits')].map((e) => e.textContent).join('\n') ||
+        [tr?.current?.about, tr?.current?.credits].filter(Boolean).join('\n'),
+      cc: !!doc.querySelector('#license a[href*="creativecommons.org"], a[href*="creativecommons.org/licenses"]'),
+      selfReleased: labels.length === 0,
+      streaming: true,
+      lossless: downloadable !== false,      // Bandcamp downloads include FLAC/ALAC/WAV
+      streamingOnly: downloadable === false,
+      downloadUnknown: downloadable === null,
+      oldDate,
+      relDate, pubDate, lateUpload,
+      partOfAlbum,
+      preorder: !!(tr?.album_is_preorder || tr?.is_preorder),
+      artUrl, noArt: !artId, embed,
+      mediaLinks: embed ? [{ service: 'Bandcamp', url: embed }] : [],
+      physical,
+      labelLocation: (ld?.publisher?.foundingLocation?.name || '').trim()
+    };
+  }
+
+  function normalizeBeatport(nd) {
+    const pp = nd.props.pageProps;
+    const r = pp.release;
+    const t0 = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
+    // "DAV (Croatia)": the country in brackets is how Beatport tells namesakes apart
+    const bpName = (n) => t0(n).replace(/\s+\((?:[A-Z][a-z]+(?:\s[A-Z][a-z]+)*|UK|US|USA|NL|DE|FR|IT|ES|BR|AR|AU|CA|JP)\)$/, '');
+    const q = (pp.dehydratedState?.queries || []).find((x) => Array.isArray(x.queryKey) && x.queryKey[0] === 'tracks');
+    let list = (q && q.state && q.state.data && q.state.data.results) || [];
+    // the data order is the reverse of the site order: sort by increasing id
+    list = list.slice().sort((a, b2) => (a.id || 0) - (b2.id || 0));
+    const relArtists = (r.artists || []).map((a) => bpName(a.name)).filter(Boolean);
+    const bogus = (n) => /^(remixes|various|various artists|va|v\/a)$/i.test(n);
+    const various = /^various artists$/i.test(t0(r.name)) || relArtists.length >= 5 || relArtists.every(bogus);
+    const artist = various ? 'Various Artists' : relArtists.join(', ');
+    const artistsList = various ? [{ name: 'Various Artists', anv: '', join: '', various: true }] : relArtists.map((n, i) => ({ name: n, anv: '', join: i < relArtists.length - 1 ? ',' : '', various: false }));
+    const tracks = list.map((t, i) => {
+      let title = t0(t.name);
+      const mix = t0(t.mix_name);
+      // "Original Mix" is not written; other versions in brackets, unless already in the name
+      if (mix && !/^original( mix| version)?$/i.test(mix) && !title.toLowerCase().includes(mix.toLowerCase())) title += ' (' + mix + ')';
+      const artists = (t.artists || []).map((a) => bpName(a.name)).filter((n) => n && !bogus(n));
+      return { pos: String(i + 1), title: title.replace(/\|/g, '/'), dur: t0(t.length), artist: artists.join(', '), artists, remixers: (t.remixers || []).map((a) => bpName(a.name)) };
+    });
+    const creditList = [];
+    tracks.forEach((t) => t.remixers.forEach((n) => creditList.push({ name: n, role: 'Remix', tracks: t.pos })));
+    tracks.forEach((t) => { delete t.remixers; });
+    const genres = [...new Set(list.map((t) => t0(t.genre && t.genre.name)).concat(list.map((t) => t0(t.sub_genre && t.sub_genre.name))).filter(Boolean))];
+    let [year, month, day] = (t0(r.new_release_date || r.publish_date).match(/^(\d{4})-(\d{2})-(\d{2})/) || []).slice(1);
+    let oldDate = '';
+    // Beatport exists since 2004: an earlier date is not the digital issue's
+    if (year && +year < 2004) { oldDate = [year, month, day].join('-'); year = month = day = ''; }
+    // "Howl Label" / "Howl (Label)": "Label" is an internal Beatport addition for same-name labels
+    const label = t0(r.label && r.label.name).replace(/\s*(?:\(label\)|\blabel)\s*$/i, '').trim();
+    const catno = t0(r.catalog_number);
+    const img = r.image && (r.image.dynamic_uri || r.image.uri) ? String(r.image.dynamic_uri || r.image.uri).replace('{w}x{h}', '1400x1400') : '';
+    return {
+      source: 'Beatport',
+      url: 'https://www.beatport.com/release/' + (r.slug || 'release') + '/' + r.id,
+      artist,
+      artistSearch: various ? '' : relArtists[0] || '',
+      artistsList,
+      title: t0(r.name),
+      year: year || '', month: month || '', day: day || '',
+      labels: label ? [{ name: label, catno: catno && catno !== t0(r.upc) ? catno : '', noCat: false }] : [],
+      country: '',
+      formatName: 'File',
+      boxSet: false,
+      various,
+      descriptions: [], formatTexts: [],
+      tracks,
+      credits: [], creditList,
+      genres: genres.length ? ['Electronic'] : [], styles: genres,
+      notes: t0(r.desc),
+      typeHint: '',
+      selfReleased: !label,
+      // Beatport: only previews and a DJ subscription stream, not a listening service -> only "Digital file" (Digital releases §8)
+      streaming: false,
+      lossless: true,
+      oldDate,
+      preorder: !!r.pre_order,
+      artUrl: img, noArt: false
+    };
+  }
+
+  function normalizeMB(doc, loc) {
+    const js = [...doc.querySelectorAll('script[type="application/json"]')].map((x) => x.textContent).find((x) => x.includes('"initialCreditsMode"'));
+    if (!js) throw new Error(say('dati release non trovati.', 'release data not found.'));
+    const j = JSON.parse(js);
+    const r = j.release;
+    const LT = (j.initialLinkedEntities && j.initialLinkedEntities.link_type) || {};
+    const t0 = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
+    const pipe = (x) => t0(x).replace(/\|/g, '/');
+    const acList = (ac) => ((ac && ac.names) || []).map((a) => ({ name: t0(a.artist && a.artist.name) || t0(a.name), anv: t0(a.name), join: t0(a.joinPhrase) }));
+    const acText = (ac) => acList(ac).map((a, i, l) => a.anv + (i < l.length - 1 ? (a.join === ',' ? ', ' : ' ' + a.join + ' ') : '')).join('').replace(/\s+([,;])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+    const msTime = (ms) => secToTime(Math.round((ms || 0) / 1000));
+    const cap = (x) => t0(x).replace(/(^|\s)(\p{Ll})/gu, (m, a, b) => a + b.toUpperCase());
+    // Discogs-style role from the MusicBrainz relationship type
+    const MOD = /^(additional|guest|solo|assistant|associate|co|executive|partial|live|instrumental|cover|translator)$/;
+    const roleOf = (rl) => {
+      const id = rl.linkTypeID;
+      const attrs = (rl.attributes || []).map((a) => t0(a.typeName || (a.type && a.type.name))).filter(Boolean);
+      const own = attrs.filter((a) => !MOD.test(a));
+      const pre = attrs.filter((a) => /^(assistant|associate|co|executive)$/.test(a)).map((a) => (a === 'co' ? 'Co-' : cap(a) + ' ')).join('');
+      if (id === 148) return own.length ? own.map((a) => (/quartet|quintet|trio|ensemble|consort/i.test(a) ? 'Ensemble' : cap(a))) : ['Instruments'];
+      if (id === 149) return own.length ? own.map(cap) : ['Vocals'];
+      const fixed = { 150: 'Orchestra', 151: 'Conductor', 152: 'Chorus Master', 156: 'Performer', 153: 'Remix', 154: 'Remix', 143: 'Mixed By', 26: 'Mixed By', 42: 'Mastered By', 136: 'Mastered By', 24: 'Liner Notes', 20: 'Photography By', 18: 'Art Direction', 27: 'Graphic Design', 993: 'Artwork', 19: 'Design', 928: 'Design', 929: 'Booklet Editor', 168: 'Composed By', 165: 'Lyrics By', 167: 'Written-By', 293: 'Arranged By', 297: 'Arranged By', 158: 'Arranged By', 295: 'Arranged By', 164: 'Orchestrated By', 300: 'Orchestrated By' };
+      if (fixed[id]) return [pre + fixed[id]];
+      const lt = LT[String(id)] || {};
+      if (!lt.name || /^(misc|recorded at|mixed at|copyright|phonographic copyright|publishing|premiere|dedication|parts|performance|arrangement|wikidata)/.test(lt.name)) return [];
+      return [pre + cap(lt.name)];
+    };
+    // tracks: vinyl "A1" positions or numbers; with several media "2-3" as on Discogs
+    const mediums = r.mediums || [];
+    const multi = mediums.length > 1;
+    const credits = new Map();
+    const credit = (name, role, pos) => {
+      const k = name.toLowerCase() + '|' + role;
+      if (!credits.has(k)) credits.set(k, { name, role, tracks: [], all: false });
+      const c = credits.get(k);
+      if (pos == null) c.all = true; else if (!c.tracks.includes(pos)) c.tracks.push(pos);
+    };
+    const tracks = [];
+    let anyParts = false, conductor = false;
+    const composerIds = new Set();
+    mediums.forEach((m) => {
+      const rows = [];
+      (m.tracks || []).forEach((t) => {
+        const num = t0(t.number) || String(t.position);
+        const pos = multi && /^\d+$/.test(num) ? m.position + '-' + num : num;
+        const rec = t.recording || {};
+        const rels = rec.relationships || [];
+        rels.filter((x) => x.target_type === 'artist').forEach((x) => {
+          if (x.linkTypeID === 151 || x.linkTypeID === 150) conductor = true;
+          roleOf(x).forEach((role) => credit(t0(x.target.name) || t0(x.entity0_credit), role, pos));
+        });
+        // works: composers (and lyricists/arrangers) and the "parent" work for movements
+        let work = '', parent = null;
+        rels.filter((x) => x.linkTypeID === 278 && x.target).forEach((x) => {
+          const w = x.target;
+          work = work || t0(w.name);
+          (w.relationships || []).forEach((y) => {
+            if (y.target_type === 'artist' && [168, 165, 167, 293, 164].includes(y.linkTypeID)) { roleOf(y).forEach((role) => credit(t0(y.target.name) || t0(y.entity0_credit), role, pos)); if (y.linkTypeID === 168) composerIds.add(y.target.gid || y.target.name); }
+            if (y.linkTypeID === 281 && y.backward && y.target) { parent = parent || { id: y.target.gid || y.target.id, name: t0(y.target.name) }; anyParts = true; }
+          });
+          // track linked to the whole work that has movements: several consecutive tracks are its movements
+          if (!parent && (w.relationships || []).some((y) => y.linkTypeID === 281 && !y.backward)) { parent = { id: w.gid || w.id, name: t0(w.name) }; anyParts = true; }
+        });
+        const al = acList(t.artistCredit);
+        rows.push({ pos, title: pipe(t.name), dur: msTime(t.length || rec.length), artist: pipe(acText(t.artistCredit)), artists: al.map((a) => a.name).filter((n) => n && !isVarious(n)), work, parent });
+      });
+      // consecutive movements of the same work: a heading line with the work, and the title without "Work: " in front
+      for (let i = 0; i < rows.length;) {
+        const p = rows[i].parent;
+        let j = i;
+        while (p && j < rows.length && rows[j].parent && rows[j].parent.id === p.id) j++;
+        if (p && j - i >= 2) {
+          const grp = rows.slice(i, j);
+          const pre = grp.map((x) => (x.title.match(/^(.+?):\s+\S/) || [])[1]).reduce((a, b) => (a === b ? a : null));
+          tracks.push({ pos: '', title: (pre || p.name).trim(), dur: '', header: true, mbWork: p.name });
+          grp.forEach((x) => { if (pre) x.title = x.title.slice(pre.length).replace(/^:\s*/, ''); x.mbWork = p.name; tracks.push(x); });
+          i = j;
+        } else { rows[i].mbWork = rows[i].work; tracks.push(rows[i]); i++; }
+      }
+    });
+    tracks.forEach((t) => { delete t.parent; delete t.work; });
+    (r.relationships || []).filter((x) => x.target_type === 'artist').forEach((x) => {
+      if (x.linkTypeID === 151 || x.linkTypeID === 150) conductor = true;
+      roleOf(x).forEach((role) => credit(t0(x.target.name) || t0(x.entity0_credit), role, null));
+    });
+    const allPos = tracks.filter((t) => !t.header).map((t) => t.pos);
+    const creditList = [...credits.values()].map((c) => ({ name: c.name, role: c.role, tracks: c.all || allPos.every((p) => c.tracks.includes(p)) ? '' : c.tracks.join(', ') }));
+    const artistsList = acList(r.artistCredit).map((a) => ({ name: a.name, anv: a.anv !== a.name ? a.anv : '', join: a.join.replace(/;$/, '-'), various: isVarious(a.name) }));
+    const ev = (r.events || []).find((e) => e.date && e.date.year) || (r.events || [])[0] || {};
+    const dt = ev.date || {};
+    const p2 = (n) => (n ? String(n).padStart(2, '0') : '');
+    // format: from the first medium ("12\" Vinyl", "CD", "Digital Media")
+    const fmtOf = (name) => {
+      const n = t0(name);
+      if (/vinyl/i.test(n)) return { name: 'Vinyl', desc: (n.match(/^(\d+)"/) || [])[1] ? [(n.match(/^(\d+)"/) || [])[1] + '"'] : [] };
+      if (/shellac/i.test(n)) return { name: 'Shellac', desc: (n.match(/^(\d+)"/) || [])[1] ? [(n.match(/^(\d+)"/) || [])[1] + '"'] : [] };
+      if (/digital media|download/i.test(n)) return { name: 'File', desc: [] };
+      if (/sacd/i.test(n)) return { name: 'SACD', desc: [] };
+      if (/blu-?ray/i.test(n)) return { name: 'Blu-ray', desc: [] };
+      if (/dvd/i.test(n)) return { name: 'DVD', desc: [] };
+      if (/cassette/i.test(n)) return { name: 'Cassette', desc: [] };
+      if (/\bcd\b/i.test(n)) return { name: 'CD', desc: n.includes('HDCD') ? ['HDCD'] : [] };
+      return { name: n, desc: [] };
+    };
+    const fm = mediums.map((m) => fmtOf(m.format && m.format.name));
+    const f = fm[0] || { name: '', desc: [] };
+    const rg = r.releaseGroup || {};
+    const typeDesc = { 1: 'Album', 2: 'Single', 3: 'EP' }[rg.typeID] || '';
+    const sec = rg.secondaryTypeIDs || [];
+    const desc = f.desc.concat(typeDesc ? [typeDesc] : []).concat(sec.includes(1) ? ['Compilation'] : []).concat(f.name === 'Vinyl' && typeDesc === 'Album' && f.desc.includes('12"') ? ['LP'] : []);
+    const formatsAll = [];
+    fm.forEach((x) => { const g = formatsAll.find((y) => y.name === x.name); if (g) g.qty = String(+g.qty + 1); else formatsAll.push({ name: x.name, qty: '1', descriptions: x.desc.concat(typeDesc ? [typeDesc] : []), text: '' }); });
+    const genres = [...doc.querySelectorAll('.genre-list a')].map((a) => t0(a.textContent)).filter(Boolean);
+    // classical: "classical" genre, or conductors/orchestras, or works split into movements
+    // or, as in MusicBrainz classical style, "Composers; Performers" in the release artist
+    const relAc = ((r.artistCredit && r.artistCredit.names) || []).map((a) => a.artist && (a.artist.gid || a.artist.name));
+    const compCover = relAc.some((id) => composerIds.has(id)) && relAc.some((id) => !composerIds.has(id));
+    const classical = genres.some((g) => /classical|opera|baroque|romantic|chamber|symphon/i.test(g)) || conductor || anyParts || compCover;
+    const labels = (r.labels || []).map((l) => ({ name: t0(l.label && l.label.name), catno: /^\[?none\]?$/i.test(t0(l.catalogNumber)) ? '' : t0(l.catalogNumber), noCat: /^\[?none\]?$/i.test(t0(l.catalogNumber)) })).filter((l) => l.name && !/^\[no label\]$/i.test(l.name));
+    const gid = r.gid || loc.pathname.split('/')[2];
+    // listening links of the release (Spotify, Deezer, Apple Music, Tidal, Qobuz, YouTube, SoundCloud, Bandcamp) for Rym media links
+    const mediaLinks = mediaFrom((r.relationships || []).filter((x) => x.target_type === 'url').map((x) => t0(x.target && (x.target.name || x.target.href_url))).concat([...doc.querySelectorAll('.external_links a[href]')].map((a) => a.href)));
+    return {
+      source: 'MusicBrainz',
+      id: gid,
+      url: 'https://musicbrainz.org/release/' + gid,
+      artist: acText(r.artistCredit),
+      artistSearch: (artistsList.find((a) => !a.various) || {}).name || '',
+      artistsList,
+      title: t0(r.name),
+      year: dt.year ? String(dt.year) : '', month: p2(dt.month), day: p2(dt.day),
+      labels,
+      selfReleased: (r.labels || []).some((l) => /^\[no label\]$/i.test(t0(l.label && l.label.name))),
+      country: t0(ev.country && ev.country.name),
+      formatName: f.name,
+      boxSet: false,
+      various: artistsList.some((a) => a.various),
+      classical,
+      descriptions: desc, mainDescriptions: desc,
+      formatTexts: [], vinylTexts: [],
+      formatsAll,
+      tracks,
+      credits: creditList.map((c) => c.name + ' – ' + c.role + (c.tracks ? ' (' + c.tracks + ')' : '')),
+      creditList,
+      genres: classical ? ['Classical'] : [], styles: genres,
+      notes: '',
+      typeHint: '',
+      artUrl: r.cover_art_presence === 'present' ? 'https://coverartarchive.org/release/' + gid + '/front' : '', noArt: false,
+      mediaLinks
+    };
+  }
+
+  // services accepted in Rym media links (wiki "Media links"); not Beatport, Juno, Traxsource
+  const MEDIA_SERVICES = [['Spotify', /open\.spotify\.com\/(?:intl-[a-z-]+\/)?album\//i], ['Apple Music', /music\.apple\.com\/.*\/album\//i], ['Deezer', /deezer\.com\/(?:[a-z]{2}\/)?album\//i],
+    ['Tidal', /tidal\.com\/(?:browse\/)?album\//i], ['Qobuz', /qobuz\.com\/.*album\//i], ['YouTube', /(?:music\.)?youtube\.com\/(?:playlist|watch)/i], ['SoundCloud', /soundcloud\.com\/[^/]+\/sets\//i], ['Bandcamp', /bandcamp\.com\/album\//i]];
+  function mediaFrom(urls) {
+    const out = [];
+    (urls || []).forEach((u) => {
+      const svc = MEDIA_SERVICES.find(([, re]) => re.test(u || ''));
+      if (!svc) return;
+      // Spotify: only open.spotify.com, without "intl-xx" and parameters
+      let url = String(u).trim();
+      if (svc[0] === 'Spotify') url = url.replace(/\/intl-[a-z-]+\//i, '/').replace(/\?.*$/, '');
+      if (!out.some((x) => x.url === url)) out.push({ service: svc[0], url });
+    });
+    return out;
+  }
+
+  // Apple Music: page data (JSON-LD and "serialized-server-data")
+  function normalizeApple(doc, loc) {
+    const t0 = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
+    const ldEl = doc.getElementById('schema:music-album') || [...doc.querySelectorAll('script[type="application/ld+json"]')].find((x) => /MusicAlbum/.test(x.textContent));
+    const ld = ldEl ? JSON.parse(ldEl.textContent) : null;
+    const sd = doc.getElementById('serialized-server-data');
+    const srv = sd ? JSON.parse(sd.textContent) : null;
+    const page = srv && (Array.isArray(srv.data) ? srv.data[0] : srv[0]);
+    const sections = (page && page.data && page.data.sections) || [];
+    const head = (sections.find((x) => x.itemKind === 'containerDetailHeaderLockup') || { items: [] }).items[0] || {};
+    const items = sections.filter((x) => x.itemKind === 'trackLockup').flatMap((x) => x.items || []);
+    const foot = ((sections.find((x) => x.itemKind === 'containerDetailTracklistFooterLockup') || { items: [] }).items[0] || {}).description || '';
+    if (!ld && !head.title) throw new Error(say('dati album non trovati.', 'album data not found.'));
+    // " - EP" / " - Single" in the title: it is the type, not part of the title
+    let title = t0(head.title || (ld && ld.name));
+    const tm = title.match(/\s+-\s+(EP|Single)$/i);
+    if (tm) title = title.slice(0, tm.index);
+    const artists = (head.subtitleLinks || []).map((x) => t0(x.title)).filter(Boolean);
+    const ldArtists = [].concat((ld && ld.byArtist) || []).map((a) => t0(a.name)).filter(Boolean);
+    const names = artists.length ? artists : ldArtists;
+    const discs = new Set(items.map((x) => x.discNumber || 1));
+    const tracks = items.length ? items.map((x, i) => ({ pos: discs.size > 1 ? (x.discNumber || 1) + '-' + (x.trackNumber || i + 1) : String(x.trackNumber || i + 1), title: t0(x.title).replace(/\|/g, '/'), dur: secToTime(Math.round((x.duration || 0) / 1000)), artist: t0(x.artistName), artists: t0(x.artistName) ? [t0(x.artistName)] : [] }))
+      : [].concat((ld && ld.tracks) || []).map((x, i) => ({ pos: String(i + 1), title: t0(x.name), dur: secToTime(isoToSec(x.duration)) }));
+    const relArtist = names.join(' & ');
+    tracks.forEach((t) => { if (t.artist && t.artist.toLowerCase() === relArtist.toLowerCase()) { t.artist = ''; t.artists = []; } });
+    // composers per track ("composer" field) as credits
+    const comp = new Map();
+    items.forEach((x, i) => String(x.composer || '').split(/\s*(?:,|&)\s*/).map(t0).filter(Boolean).forEach((n) => { if (!comp.has(n)) comp.set(n, []); comp.get(n).push(tracks[i].pos); }));
+    const allPos = tracks.map((t) => t.pos);
+    const creditList = [...comp.entries()].map(([name, ps]) => ({ name, role: 'Written-By', tracks: ps.length === allPos.length ? '' : ps.join(', ') }));
+    const date = t0(ld && ld.datePublished).match(/^(\d{4})-(\d{2})-(\d{2})/) || [];
+    // label from the ℗ line ("℗ 2026 Semantica Records")
+    const pl = (foot.match(/℗\s*(?:\d{4}\s+)?([^,\n]+)/) || [])[1] || '';
+    const label = t0(pl).replace(/\s+under exclusive licen[cs]e.*$/i, '');
+    const art = head.artwork && head.artwork.dictionary;
+    const artUrl = art && art.url ? art.url.replace('{w}x{h}', (art.width || 3000) + 'x' + (art.height || 3000)).replace('{f}', 'jpg') : '';
+    const url = t0((page && page.data && page.data.canonicalURL) || (ld && ld.url) || (loc.origin + loc.pathname));
+    return {
+      source: 'Apple Music', url,
+      artist: relArtist, artistSearch: names[0] || '', artistsList: names.map((n, i) => ({ name: n, anv: '', join: i < names.length - 1 ? '&' : '' })),
+      title, year: date[1] || '', month: date[2] || '', day: date[3] || '',
+      labels: label ? [{ name: label, catno: '', noCat: false }] : [], selfReleased: !label,
+      country: '', formatName: 'File', boxSet: false, various: names.some(isVarious),
+      descriptions: tm ? [tm[1].toUpperCase() === 'EP' ? 'EP' : 'Single'] : [], mainDescriptions: tm ? [tm[1].toUpperCase() === 'EP' ? 'EP' : 'Single'] : [],
+      formatTexts: [], tracks, credits: [], creditList,
+      genres: [], styles: [].concat((ld && ld.genre) || []).map(t0).filter((g) => g && g !== 'Music'),
+      notes: foot, typeHint: '',
+      streaming: true, lossless: false,
+      artUrl, noArt: !artUrl,
+      mediaLinks: mediaFrom([url.replace(/\?.*$/, '')])
+    };
+  }
+
+  // Deezer: page state (window.__DZR_APP_STATE__)
+  function normalizeDeezer(doc, loc) {
+    const t0 = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
+    const sc = [...doc.querySelectorAll('script')].map((x) => x.textContent).find((x) => x.includes('__DZR_APP_STATE__'));
+    if (!sc) throw new Error(say('dati album non trovati.', 'album data not found.'));
+    const st = JSON.parse(sc.slice(sc.indexOf('{'), sc.lastIndexOf('}') + 1));
+    const d = st.DATA || {};
+    const songs = (st.SONGS && st.SONGS.data) || [];
+    const names = (d.ARTISTS || []).filter((a) => String(a.ROLE_ID || '0') === '0').map((a) => t0(a.ART_NAME)).filter(Boolean);
+    if (!names.length && d.ART_NAME) names.push(t0(d.ART_NAME));
+    const relArtist = names.join(' & ');
+    const discs = new Set(songs.map((x) => +x.DISK_NUMBER || 1));
+    const tracks = songs.map((x, i) => {
+      const al = (x.ARTISTS || []).map((a) => t0(a.ART_NAME)).filter(Boolean);
+      const own = al.length && al.join(' & ').toLowerCase() === relArtist.toLowerCase();
+      return { pos: discs.size > 1 ? (+x.DISK_NUMBER || 1) + '-' + (+x.TRACK_NUMBER || i + 1) : String(+x.TRACK_NUMBER || i + 1), title: (t0(x.SNG_TITLE) + (t0(x.VERSION) ? ' ' + t0(x.VERSION) : '')).replace(/\|/g, '/'), dur: secToTime(+x.DURATION || 0), artist: own ? '' : al.join(' & '), artists: own ? [] : al };
+    });
+    // track credits (authors, composers, engineers)
+    const ROLE = { author: 'Written-By', composer: 'Composed By', lyricist: 'Lyrics By', producer: 'Producer', vocalproducer: 'Vocal Producer', mixer: 'Mixed By', mixingengineer: 'Mixed By', masteringengineer: 'Mastered By', recordingengineer: 'Recorded By', engineer: 'Engineer', assistantengineer: 'Assistant Engineer', orchestra: 'Orchestra', conductor: 'Conductor', featuredartist: 'Featuring', arranger: 'Arranged By' };
+    const cr = new Map();
+    songs.forEach((x, i) => Object.entries(x.SNG_CONTRIBUTORS || {}).forEach(([k, list]) => {
+      const role = ROLE[k.toLowerCase().replace(/[\s_]/g, '')];
+      if (!role) return;
+      [].concat(list || []).map(t0).filter(Boolean).forEach((n) => { const key = n + '|' + role; if (!cr.has(key)) cr.set(key, { name: n, role, ps: [] }); cr.get(key).ps.push(tracks[i].pos); });
+    }));
+    const allPos = tracks.map((t) => t.pos);
+    const creditList = [...cr.values()].map((c) => ({ name: c.name, role: c.role, tracks: c.ps.length === allPos.length ? '' : c.ps.join(', ') }));
+    const date = t0(d.DIGITAL_RELEASE_DATE || d.PHYSICAL_RELEASE_DATE || d.ORIGINAL_RELEASE_DATE).match(/^(\d{4})-(\d{2})-(\d{2})/) || [];
+    const label = t0(d.LABEL_NAME);
+    const id = t0(d.ALB_ID) || (loc.pathname.match(/album\/(\d+)/) || [])[1] || '';
+    const url = 'https://www.deezer.com/album/' + id;
+    const sub = d.SUBTYPES || {};
+    return {
+      source: 'Deezer', url,
+      artist: relArtist, artistSearch: names[0] || '', artistsList: names.map((n, i) => ({ name: n, anv: '', join: i < names.length - 1 ? '&' : '' })),
+      title: t0(d.ALB_TITLE) + (t0(d.VERSION) ? ' ' + t0(d.VERSION) : ''),
+      year: date[1] || '', month: date[2] || '', day: date[3] || '',
+      labels: label ? [{ name: label, catno: '', noCat: false }] : [], selfReleased: !label,
+      country: '', formatName: 'File', boxSet: false, various: names.some(isVarious),
+      descriptions: sub.isCompilation ? ['Compilation'] : [], mainDescriptions: sub.isCompilation ? ['Compilation'] : [],
+      formatTexts: [], tracks, credits: [], creditList,
+      genres: [], styles: [], notes: [t0(d.PRODUCER_LINE), t0(d.COPYRIGHT)].filter(Boolean).join('\n'), typeHint: '',
+      streaming: true, lossless: false,
+      artUrl: d.ALB_PICTURE ? 'https://cdn-images.dzcdn.net/images/cover/' + d.ALB_PICTURE + '/1800x1800-000000-80-0-0.jpg' : '', noArt: !d.ALB_PICTURE,
+      mediaLinks: id ? [{ service: 'Deezer', url }] : []
+    };
+  }
+
+  // Beatport: the page's Next.js data
+  const nextData = (html, doc) => {
+    const el = html ? new DOMParser().parseFromString(html, 'text/html').getElementById('__NEXT_DATA__') : (doc || document).getElementById('__NEXT_DATA__');
+    try { return JSON.parse(el.textContent); } catch (e) { return null; }
+  };
+
+  // Discogs: release (or master -> main release), artist aliases, master year
+  function discogsFetch(kind, id, doc, done, fail, live) {
+    const alive = live || (() => true);
+    const loadRelease = (rid, master) => {
+      getJSON('https://api.discogs.com/releases/' + rid, (d) => {
+        if (!alive()) return;
+        const data = normalizeDiscogs(d, doc);
+        if (master) { data.masterYear = master.year || null; data.mainRelease = master.main_release || null; data.fromMaster = true; }
+        const a0 = (d.artists || []).find((a) => a.id && !/^various$/i.test(a.name || ''));
+        const afterArtist = () => {
+          if (master || !d.master_id) return done(data);
+          getJSON('https://api.discogs.com/masters/' + d.master_id, (mj) => {
+            if (!alive()) return;
+            data.masterYear = mj.year || null; data.mainRelease = mj.main_release || null;
+            done(data);
+          }, () => { if (alive()) done(data); });
+        };
+        if (!a0) return afterArtist();
+        getJSON('https://api.discogs.com/artists/' + a0.id, (aj) => {
+          if (!alive()) return;
+          data.aliases = [aj.realname].concat((aj.aliases || []).map((x) => x.name), aj.namevariations || []).filter((x) => typeof x === 'string' && x.trim()).map((x) => x.replace(/\s*\(\d+\)$/, '').trim()).slice(0, 30);
+          afterArtist();
+        }, () => { if (alive()) afterArtist(); });
+      }, fail);
+    };
+    if (kind === 'master') {
+      getJSON('https://api.discogs.com/masters/' + id, (mj) => {
+        if (!alive()) return;
+        if (!mj.main_release) return fail('main_release');
+        loadRelease(mj.main_release, mj);
+      }, fail);
+    } else loadRelease(id, null);
+  }
+
+  // "Import from link": reads the source without opening it (GM_xmlhttpRequest)
+  function importFromLink(link, done, fail) {
+    let u;
+    try { u = new URL(String(link || '').trim()); } catch (e) { return fail(say('link non valido', 'invalid link')); }
+    const h = u.hostname.replace(/^www\./, '');
+    const page = (cb) => GM_xmlhttpRequest({
+      method: 'GET', url: u.href,
+      onload: (r) => {
+        if (r.status !== 200) return fail('HTTP ' + r.status);
+        try { cb(r.responseText, new DOMParser().parseFromString(r.responseText, 'text/html')); } catch (e) { fail(e.message); }
+      },
+      onerror: () => fail(say('rete', 'network'))
+    });
+    const loc = { origin: u.origin, pathname: u.pathname, href: u.href, hash: u.hash };
+    let m;
+    if (h.endsWith('discogs.com') && (m = u.pathname.match(/\/(release|master)\/(\d+)/))) return discogsFetch(m[1], m[2], null, done, fail);
+    if (h.endsWith('bandcamp.com') && /^\/(album|track)\//.test(u.pathname)) return page((html, doc) => done(normalizeBandcamp(doc, loc)));
+    if (h === 'beatport.com' && /\/release\//.test(u.pathname)) return page((html) => { const nd = nextData(html); if (!nd) throw new Error(say('dati non trovati', 'data not found')); done(normalizeBeatport(nd)); });
+    if (/(^|\.)musicbrainz\.org$/.test(h) && /^\/release\/[0-9a-f-]{36}/.test(u.pathname)) return page((html, doc) => done(normalizeMB(doc, loc)));
+    if (h === 'music.apple.com' && /\/album\//.test(u.pathname)) return page((html, doc) => done(normalizeApple(doc, loc)));
+    if (h === 'deezer.com' && /\/album\/\d+/.test(u.pathname)) return page((html, doc) => done(normalizeDeezer(doc, loc)));
+    return fail(say('sito non supportato (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer)', 'site not supported (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer)'));
+  }
+
+  // =====================================================================
   //  DISCOGS SIDE
   // =====================================================================
   if (host.endsWith('discogs.com')) {
@@ -102,17 +872,6 @@
       b.style.display = /\/(release|master)\/\d+/.test(location.pathname) ? 'block' : 'none';
     }, 800);
 
-    function getJSON(url, ok, ko) {
-      GM_xmlhttpRequest({
-        method: 'GET', url, headers: { Accept: 'application/json' },
-        onload: (r) => {
-          if (r.status !== 200) return ko(r.status);
-          let j; try { j = JSON.parse(r.responseText); } catch (e) { return ko('JSON'); }
-          ok(j);
-        },
-        onerror: () => ko(say('rete', 'network'))
-      });
-    }
 
     // every click gets a number: responses from an earlier click are ignored
     let reqId = 0;
@@ -123,183 +882,9 @@
       if (!m) return toast(say('Apri una pagina release (o master) di Discogs.', 'Open a Discogs release (or master) page.'), false);
       b.textContent = say('Carico…', 'Loading…');
       const fail = (why) => { if (!live()) return; b.textContent = '→ Rym'; toast(say('Errore API Discogs: ', 'Discogs API error: ') + why, false); };
-      // master page: its main release is imported
-      if (m[1] === 'master') {
-        getJSON('https://api.discogs.com/masters/' + m[2], (mj) => {
-          if (!live()) return;
-          if (!mj.main_release) return fail('main_release');
-          loadRelease(mj.main_release, mj);
-        }, fail);
-        return;
-      }
-      loadRelease(m[2], null);
-
-      function loadRelease(id, master) {
-        getJSON('https://api.discogs.com/releases/' + id, (d) => {
-          if (!live()) return;
-          b.textContent = '→ Rym';
-          const data = normalizeDiscogs(d);
-          if (master) {
-            data.masterYear = master.year || null; data.mainRelease = master.main_release || null; data.fromMaster = true;
-            return sendToRym(data);
-          }
-          if (!d.master_id) return sendToRym(data);
-          // master: year of the first release, to spot undeclared reissues
-          getJSON('https://api.discogs.com/masters/' + d.master_id, (mj) => {
-            if (!live()) return;
-            data.masterYear = mj.year || null; data.mainRelease = mj.main_release || null;
-            sendToRym(data);
-          }, () => { if (live()) sendToRym(data); });
-        }, fail);
-      }
+      discogsFetch(m[1], m[2], document, (data) => { b.textContent = '→ Rym'; sendToRym(data); }, fail, live);
     }
 
-    function normalizeDiscogs(d) {
-      // Artist
-      let artist = '';
-      (d.artists || []).forEach((a) => {
-        artist += clean(a.anv || a.name);
-        if (a.join) artist += a.join === ',' ? ', ' : ' ' + a.join + ' ';
-      });
-      artist = artist.trim();
-
-      // Date
-      const [y, mo, da] = (d.released || String(d.year || '')).split('-');
-
-      // Format: skip containers ("Box Set", "All Media") and take the first real medium
-      const media = (d.formats || []).filter((x) => !['Box Set', 'All Media'].includes(x.name));
-      const f = media[0] || (d.formats || [])[0] || {};
-
-      // Tracks. Works in several movements (Discogs "index tracks") become, as on Rym,
-      // a header line without a number (the title of the work) followed by the movements.
-      // Section headings ("Live Recordings", the name of a work…) also become lines without a number;
-      // only generic side headings ("Side A") and untitled media headings ("CD 1", "DVD") are skipped.
-      const classical = (d.genres || []).includes('Classical');
-      const SIDE_HEADING = /^(side|face|lato)\s*[a-z0-9]+\.?$|^[a-z]\d*$|^\d+$/i;
-      const PLAIN_MEDIA_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|disc|disk|lp|vinyl|cassette|tape|record|vhs)\s*[-.:#]?\s*\d*\.?$/i;
-      const MEDIA_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|disc|disk|vhs)\b/i; // e.g. 'DVD "Concerto Live"'
-      const pipe = (s) => (s || '').replace(/\|/g, '/');
-      // track artist (V/A compilations): "Adham Zahran", "A & B", "A feat. B"
-      const artistOf = (list) => {
-        let a = '';
-        (list || []).forEach((x) => { a += clean(x.anv || x.name); if (x.join) a += x.join === ',' ? ', ' : ' ' + x.join + ' '; });
-        return pipe(a.trim());
-      };
-      const namesOf = (list) => (list || []).map((x) => clean(x.name)).filter((x) => x && !isVarious(x));
-      // the API sometimes omits sub-track artists: they are taken from the Discogs page data (same release)
-      const pageArtists = new Map();
-      try {
-        const ds = JSON.parse(document.getElementById('dsdata').textContent).data || {};
-        if (Object.keys(ds).some((k) => k === 'Release:{"discogsId":' + d.id + '}')) {
-          Object.values(ds).forEach((v) => {
-            if (!v || !/^(Sub)?Track$/.test(v.__typename || '') || !(v.primaryArtists || []).length) return;
-            const list = v.primaryArtists.map((a) => ({ name: a.displayName || '', anv: a.nameVariation || '', join: a.joiningText || '' }));
-            pageArtists.set((v.position || '').trim() + '|' + (v.title || '').trim(), list);
-          });
-        }
-      } catch (e) { /* pagina senza dati: si usa solo l'API || page without data: only the API is used */ }
-      const subArtists = (s, t) => ((s.artists || []).length ? s.artists : pageArtists.get((s.position || '').trim() + '|' + (s.title || '').trim()) || t.artists);
-      // "disc.track" positions used by the regular tracks: "13.1" sub-tracks are tracks of disc 13, not movements
-      const discPrefixes = new Set((d.tracklist || []).filter((t) => t.type_ === 'track').map((t) => ((t.position || '').trim().match(/^(\d+)[.-]\d+$/) || [])[1]).filter(Boolean));
-      let n = 0;
-      const tracks = [];
-      // medium given by the headings ("CD 1", "DVD"): passed on to the following tracks
-      let curMedia = null;
-      const OPTICAL_HEADING = /^(cd|dvd|blu-?ray|bd|sacd|vhs)\s*[-.:#]?\s*(\d*)\.?(?:\s|$)/i;
-      const hint = (row) => { if (curMedia) { row.mediaHint = curMedia.label; if (curMedia.disc) row.discHint = curMedia.disc; } return row; };
-      (d.tracklist || []).forEach((t) => {
-        if (t.type_ === 'heading') {
-          const h = (t.title || '').trim();
-          const om = h.match(OPTICAL_HEADING);
-          // CD/DVD: the medium stays with the tracks; other media (LP, cassette, "Disc") clear the information
-          if (om) curMedia = { label: om[1], disc: om[2] || '' };
-          else if (PLAIN_MEDIA_HEADING.test(h) || MEDIA_HEADING.test(h)) curMedia = null;
-          if (!h || SIDE_HEADING.test(h) || PLAIN_MEDIA_HEADING.test(h)) return;
-          const row = { pos: '', title: pipe(h), dur: '', header: true };
-          if (MEDIA_HEADING.test(h)) row.mediaHeading = true; // replaced by the "CD"/"DVD" line when there are several media
-          tracks.push(row);
-          return;
-        }
-        if (t.type_ === 'index' && Array.isArray(t.sub_tracks) && t.sub_tracks.length) {
-          tracks.push({ pos: '', title: pipe(t.title), dur: '', header: true });
-          // number of the work: from the index field, from "3.1" / "3.a" sub-tracks, otherwise the next free number
-          const dotted = (p) => (p || '').trim().match(/^(.+?)[.\-](\d+|[a-z])$/i);
-          const firstDot = t.sub_tracks.map((x) => dotted(x.position)).find(Boolean);
-          let work = (t.position || '').trim() || (firstDot ? firstDot[1] : '');
-          const needRun = !work && t.sub_tracks.some((x) => !(x.position || '').trim() || /^[a-z]$/i.test((x.position || '').trim()));
-          if (needRun) { n++; work = String(n); }
-          t.sub_tracks.forEach((s, k) => {
-            if (!needRun) n++;
-            const sp = (s.position || '').trim();
-            const letter = String.fromCharCode(97 + k);
-            // "3.1", "3.a", "a" or empty -> "3a", "3b"…; already distinct positions ("4", "B2", "3a") stay
-            const discTrack = !(t.position || '').trim() && /^(\d+)[.-]\d+$/.test(sp) && discPrefixes.has(sp.match(/^(\d+)/)[1]);
-            const pos = discTrack ? sp : (!sp || dotted(sp) || /^[a-z]$/i.test(sp)) && work ? work + letter : (sp || String(n));
-            const sa = subArtists(s, t);
-            tracks.push(hint({ pos, title: pipe(s.title), dur: s.duration || '', artist: artistOf(sa), artists: namesOf(sa) }));
-          });
-          return;
-        }
-        if (t.type_ === 'track' || t.type_ === 'index') {
-          n++;
-          tracks.push(hint({ pos: (t.position || String(n)).trim(), title: pipe(t.title), dur: t.duration || '', artist: artistOf(t.artists), artists: namesOf(t.artists) }));
-        }
-      });
-
-      return {
-        source: 'Discogs',
-        id: d.id,
-        url: 'https://www.discogs.com/release/' + d.id,
-        artist,
-        artistSearch: clean((d.artists || [])[0]?.name || artist),
-        title: d.title || '',
-        year: y && y !== '0000' ? y : '',
-        month: mo && mo !== '00' ? mo : '',
-        day: da && da !== '00' ? da : '',
-        labels: (d.labels || []).map((l) => ({ name: clean(l.name), catno: /^none$/i.test(l.catno || '') ? '' : (l.catno || ''), noCat: /^none$/i.test(l.catno || '') })),
-        country: d.country || '',
-        formatName: f.name || '',
-        boxSet: (d.formats || []).some((x) => x.name === 'Box Set'),
-        various: (d.artists || []).some((a) => isVarious(a.name)),
-        classical,
-        descriptions: (d.formats || []).flatMap((x) => x.descriptions || []),
-        // descriptions of the main medium (plus the Box Set/All Media container): they decide type and size
-        mainDescriptions: (d.formats || []).filter((x) => x === f || ['Box Set', 'All Media'].includes(x.name)).flatMap((x) => x.descriptions || []),
-        formatTexts: (d.formats || []).map((x) => x.text || '').filter(Boolean),
-        // free text of the vinyl/shellac media only (the colour of an included CD does not count)
-        vinylTexts: (d.formats || []).filter((x) => /vinyl|lathe|flexi|shellac/i.test(x.name || '')).map((x) => x.text || '').filter(Boolean),
-        tracks,
-        credits: (d.extraartists || []).map((c) => clean(c.anv || c.name) + ' – ' + c.role + (c.tracks ? ' (' + c.tracks + ')' : '')),
-        genres: d.genres || [],
-        styles: d.styles || [],
-        notes: d.notes || '',
-        bonusHeading: (d.tracklist || []).some((t) => t.type_ === 'heading' && /bonus/i.test(t.title || '')),
-        compiledBy: (d.extraartists || []).some((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks),
-        // who compiled/presented the collection (may also appear as the release artist)
-        compilers: (d.extraartists || []).filter((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks).map((c) => clean(c.name)),
-        // "feat." to add as featured credits on Rym (per track or for the whole release)
-        featured: [...new Set([
-          ...(d.tracklist || []).flatMap((t) => [t].concat(t.sub_tracks || []))
-            .flatMap((t) => (t.extraartists || []).filter((c) => /featuring/i.test(c.role || '')).map((c) => clean(c.anv || c.name) + (t.position ? ' (' + t.position + ')' : ''))),
-          ...(d.extraartists || []).filter((c) => /featuring/i.test(c.role || '')).map((c) => clean(c.anv || c.name) + (c.tracks ? ' (' + c.tracks + ')' : ''))
-        ])],
-        // performers (for classical music the Rym file under goes to them)
-        performers: [...new Set((d.extraartists || [])
-          .filter((c) => /conductor|orchestra|ensemble|choir|chorus|soloist|quartet|trio|violin|viola|cello|piano|soprano|tenor|baritone|mezzo|contralto|harpsichord|organ|guitar|flute|oboe|clarinet|bassoon|horn|trumpet|harp/i.test(c.role || ''))
-          .map((c) => clean(c.anv || c.name) + ' (' + c.role + ')'))],
-        // main artists with their joins ("&", "Feat.", "/")
-        artistsList: (d.artists || []).map((a) => ({ name: clean(a.name), anv: clean(a.anv || ''), join: (a.join || '').trim(), various: isVarious(a.name) })),
-        // structured credits: release-wide (with tracks field) and per track
-        creditList: (d.extraartists || []).map((c) => ({ name: clean(c.anv || c.name), role: c.role || '', tracks: c.tracks || '' }))
-          .concat((d.tracklist || []).flatMap((t) => [t].concat(t.sub_tracks || []))
-            .flatMap((t) => (t.extraartists || []).map((c) => ({ name: clean(c.anv || c.name), role: c.role || '', tracks: (t.position || '').trim() })))),
-        rightsSocieties: (d.identifiers || []).filter((x) => /rights society/i.test(x.type || '')).map((x) => x.value || ''),
-        depositoLegal: (d.identifiers || []).some((x) => /dep[oó]sito legal/i.test(x.type || '')),
-        companies: (d.companies || []).map((c) => ({ name: clean(c.name), role: c.entity_type_name || '' })),
-        series: (d.series || []).map((x) => clean(x.name) + (x.catno && !/^none$/i.test(x.catno) ? ' ' + x.catno : '')),
-        formatsAll: (d.formats || []).map((x) => ({ name: x.name || '', qty: x.qty || '1', descriptions: x.descriptions || [], text: x.text || '' }))
-      };
-    }
     return;
   }
 
@@ -310,185 +895,15 @@
     if (!/^\/(album|track)\//.test(location.pathname)) return;
     const b = floatingButton(() => {
       try {
-        sendToRym(normalizeBandcamp());
+        sendToRym(normalizeBandcamp(document, location));
       } catch (e) {
         toast('Can\'t read the data on this Bandcamp page. ' + e.message, false);
       }
     });
     b.title = 'Send this release to the Rym form';
 
-    function readJsonLd() {
-      for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-        try {
-          const j = JSON.parse(s.textContent);
-          const t = [].concat(j['@type'] || []).join(' ');
-          if (/MusicAlbum|MusicRecording/.test(t)) return j;
-        } catch (e) { /* invalid block: ignore */ }
-      }
-      return null;
-    }
 
-    function readTralbum() {
-      const el = document.querySelector('[data-tralbum]');
-      if (!el) return null;
-      try { return JSON.parse(el.getAttribute('data-tralbum')); } catch (e) { return null; }
-    }
 
-    function normalizeBandcamp() {
-      const ld = readJsonLd();
-      const tr = readTralbum();
-      if (!ld && !tr) throw new Error(say('Dati album non trovati.', 'Album data not found.'));
-      const isTrack = location.pathname.startsWith('/track/');
-
-      const title = (tr?.current?.title || ld?.name || '').trim();
-      const artist = (tr?.artist || ld?.byArtist?.name || '').trim();
-      if (!title || !artist) throw new Error(say('Titolo o artista mancanti.', 'Missing title or artist.'));
-
-      // Editions on sale: digital and physical (vinyl, CD, cassette) from schema.org
-      const releases = [].concat(ld?.albumRelease || ld?.inAlbum?.albumRelease || []).filter((x) => x && typeof x === 'object');
-      // Label: the "recordLabel" field first, then the publishing account if different from the artist
-      const labelOf = (x) => (x && x.recordLabel && x.recordLabel.name) || '';
-      const digitalRel = releases.find((x) => /DigitalFormat$/.test(String(x.musicReleaseFormat || '')));
-      const recordLabel = (labelOf(digitalRel) || releases.map(labelOf).find(Boolean) || '').trim();
-      const publisher = (ld?.publisher?.name || '').trim();
-      let labelName = recordLabel || (publisher && publisher.toLowerCase() !== artist.toLowerCase() ? publisher : '');
-      let labels = labelName && labelName.toLowerCase() !== artist.toLowerCase() ? [{ name: labelName, catno: '', noCat: false }] : [];
-
-      // Date, e.g. "15 Mar 2019 00:00:00 GMT"
-      const ymd = (v) => { const x = new Date(v || ''); return isNaN(x) ? null : [String(x.getUTCFullYear()), pad2(x.getUTCMonth() + 1), pad2(x.getUTCDate())]; };
-      let year = '', month = '', day = '', oldDate = '';
-      const rel = ymd(tr?.current?.release_date || tr?.album_release_date || ld?.datePublished);
-      // publish date: when the album appeared on Bandcamp (the release date is chosen by the artist)
-      const pub = ymd(tr?.current?.publish_date);
-      if (rel) {
-        [year, month, day] = rel;
-        // Bandcamp exists since 2008: an earlier date is the original release date, not the digital issue's.
-        // Rym: without a reliable source for the digital date, leave it blank.
-        if (+year < 2008) { oldDate = [year, month, day].join('-'); year = month = day = ''; }
-      }
-      const pubDate = pub ? pub.join('-') : '';
-      const relDate = rel ? rel.join('-') : '';
-      // published long after the release date: probably a digital reissue of an older release
-      const lateUpload = !!(rel && pub && (Date.parse(pubDate) - Date.parse(relDate)) > 45 * 864e5);
-
-      // Downloadable? (Rym: the Bandcamp issue is the downloadable version, lossless if available)
-      const tinfo = (tr && Array.isArray(tr.trackinfo)) ? tr.trackinfo : [];
-      let downloadable = null;
-      if (tr && tr.freeDownloadPage) downloadable = true;
-      else if (tinfo.some((t) => t.is_downloadable === true)) downloadable = true;
-      else if (tinfo.length && tinfo.every((t) => t.is_downloadable === false)) downloadable = false;
-
-      // Tracks: from the data-tralbum block first, otherwise from schema.org
-      let tracks = [];
-      if (tr && Array.isArray(tr.trackinfo) && tr.trackinfo.length) {
-        tracks = (isTrack ? tr.trackinfo.slice(0, 1) : tr.trackinfo).map((t, i) => ({ pos: isTrack ? '1' : String(t.track_num || i + 1), title: (t.title || '').replace(/\|/g, '/'), dur: secToTime(t.duration), artist: (t.artist || '').trim() }));
-      } else if (ld?.track?.itemListElement) {
-        tracks = ld.track.itemListElement.map((e, i) => ({ pos: String(e.position || i + 1), title: (e.item?.name || '').replace(/\|/g, '/'), dur: secToTime(isoToSec(e.item?.duration)) }));
-      } else if (isTrack && ld) {
-        tracks = [{ pos: '1', title: (ld.name || '').replace(/\|/g, '/'), dur: secToTime(isoToSec(ld.duration)) }];
-      }
-
-      // titles with position and artist in front ("A1 Ter Bandits : Calling Pete"): only the titles stay; the position matters only for vinyl and tape
-      const POS = /^\s*([A-Za-z]\d{1,2}|\d{1,2})(?:[.)]\s*|\s+-\s+|\s+)(?=\S)/;
-      if (tracks.length >= 2 && tracks.every((t) => POS.test(t.title))) tracks.forEach((t) => { t.sidePos = t.title.match(POS)[1].toUpperCase(); t.title = t.title.replace(POS, ''); });
-      const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const ART = new RegExp('^\\s*' + esc(artist) + '\\s*(?::|\\s-|\\s–)\\s+', 'i');
-      if (tracks.length && tracks.filter((t) => ART.test(t.title)).length >= Math.ceil(tracks.length / 2)) tracks.forEach((t) => { t.title = t.title.replace(ART, ''); });
-      // "Artist - Title" tracks (label compilations): artist and title split
-      const SEP_T = /^(.+?)\s+[-–—]\s+(.+)$/;
-      if (tracks.length >= 2 && tracks.filter((t) => !t.artist && SEP_T.test(t.title)).length >= Math.ceil(tracks.length * 0.8)) {
-        tracks.forEach((t) => { const m = !t.artist && t.title.match(SEP_T); if (m) { t.artist = m[1].trim(); t.title = m[2].trim(); } });
-      }
-      const keyOf = (x) => (x || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      tracks.forEach((t) => { t.artists = (t.artist || '').split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean); });
-      const trackNames = [];
-      tracks.forEach((t) => t.artists.forEach((n) => { if (!trackNames.some((x) => keyOf(x) === keyOf(n))) trackNames.push(n); }));
-      const others = trackNames.filter((n) => keyOf(n) !== keyOf(artist));
-      // the page account is often the label: with different artists in the tracks it is a V/A (or split) by the label
-      const pageTitle = (tr?.current?.title || ld?.name || '');
-      const vaWords = /\b(various artists|v\/a)\b|(^|[\s\/|(\[-])va([\s)\]:|\/-]|$)/i.test(pageTitle + ' ' + artist);
-      const labelish = /\b(records?|recordings|sounds?|music|label|tapes|audio|editions?|productions?|imprint|collective)\b/i.test(artist);
-      let multi = false, realArtist = artist;
-      if (others.length >= 2 || (vaWords && trackNames.length >= 2)) multi = true;
-      else if (others.length === 1 && trackNames.length === 1 && (labelish || tracks.every((t) => t.artists.length))) realArtist = others[0];
-      if ((multi || realArtist !== artist) && !labels.length) labels = [{ name: artist, catno: '', noCat: false }];
-
-      // track page that belongs to an album: not a standalone single
-      const partOfAlbum = isTrack && !!(tr?.album_url || (ld?.inAlbum && (ld.inAlbum.numTracks || 0) > 1));
-
-      // original artwork (_0 suffix = file uploaded by the artist, not the square preview)
-      const artId = tr?.art_id || tr?.current?.art_id || 0;
-      const artUrl = artId ? 'https://f4.bcbits.com/img/a' + String(artId).padStart(10, '0') + '_0.jpg' : '';
-
-      // embed code for Rym media links (albums only: Rym does not support Bandcamp tracks)
-      let embed = '';
-      try {
-        const em = JSON.parse(document.querySelector('[data-embed]')?.getAttribute('data-embed') || 'null');
-        if (em && em.tralbum_param && em.tralbum_param.name === 'album') {
-          const href = location.origin + location.pathname;
-          embed = '<iframe style="border: 0; width: 350px; height: 470px;" src="https://bandcamp.com/EmbeddedPlayer/album=' + em.tralbum_param.value +
-            '/size=large/bgcol=ffffff/linkcol=0687f5/tracklist=false/transparent=true/" seamless><a href="' + href + '">' +
-            (em.album_title || title).replace(/[<>"]/g, '') + ' by ' + (em.artist || artist).replace(/[<>"]/g, '') + '</a></iframe>';
-        }
-      } catch (e) { /* - */ }
-
-      // physical editions: from schema.org and the "packages" block (fields read tolerantly)
-      const FORMAT_LD = { VinylFormat: 'Vinyl', CDFormat: 'CD', CassetteFormat: 'Cassette', DVDFormat: 'DVD' };
-      const pk = Array.isArray(tr?.packages) ? tr.packages : [];
-      const physical = releases.filter((x) => x.musicReleaseFormat && x.musicReleaseFormat !== 'DigitalFormat').map((x, i) => {
-        const p = pk[i] || {};
-        return {
-          format: FORMAT_LD[String(x.musicReleaseFormat).replace(/^.*\//, '')] || '',
-          name: (x.name || p.title || '').trim(),
-          type: (p.type_name || p.type_title || '').trim(),
-          desc: (x.description || p.description || '').trim(),
-          catno: (x.catalogNumber || p.catalog_number || p.sku || '').toString().trim(),
-          date: (ymd(p.release_date || p.new_date) || []).join('-'),
-          edition: p.edition_size || ''
-        };
-      });
-      if (!physical.length) pk.forEach((p) => physical.push({
-        format: /vinyl|record|lp\b|7"|10"|12"/i.test(p.type_name || p.title || '') ? 'Vinyl' : /cassette|tape/i.test(p.type_name || p.title || '') ? 'Cassette' : /\bcd\b|compact disc/i.test(p.type_name || p.title || '') ? 'CD' : '',
-        name: (p.title || '').trim(), type: (p.type_name || '').trim(), desc: (p.description || '').trim(),
-        catno: (p.catalog_number || p.sku || '').toString().trim(), date: (ymd(p.release_date || p.new_date) || []).join('-'), edition: p.edition_size || ''
-      }));
-
-      return {
-        source: 'Bandcamp',
-        url: location.origin + location.pathname,
-        artist: multi ? 'Various Artists' : realArtist,
-        artistSearch: multi ? '' : realArtist,
-        title,
-        year, month, day,
-        labels,
-        country: '',
-        formatName: 'File',
-        boxSet: false,
-        various: multi || isVarious(artist),
-        descriptions: [],
-        formatTexts: [],
-        tracks,
-        credits: [],
-        typeHint: isTrack && !partOfAlbum ? 'i' : '',
-        // page tags (used to spot soundtracks) and "about"/"credits" texts
-        styles: [...document.querySelectorAll('.tralbum-tags a, a.tag')].map((a) => a.textContent.trim()).filter(Boolean),
-        notes: [...document.querySelectorAll('.tralbum-about, .tralbum-credits')].map((e) => e.textContent).join('\n') ||
-          [tr?.current?.about, tr?.current?.credits].filter(Boolean).join('\n'),
-        cc: !!document.querySelector('#license a[href*="creativecommons.org"], a[href*="creativecommons.org/licenses"]'),
-        selfReleased: labels.length === 0,
-        streaming: true,
-        lossless: downloadable !== false,      // Bandcamp downloads include FLAC/ALAC/WAV
-        streamingOnly: downloadable === false,
-        downloadUnknown: downloadable === null,
-        oldDate,
-        relDate, pubDate, lateUpload,
-        partOfAlbum,
-        preorder: !!(tr?.album_is_preorder || tr?.is_preorder),
-        artUrl, noArt: !artId, embed,
-        physical,
-        labelLocation: (ld?.publisher?.foundingLocation?.name || '').trim()
-      };
-    }
     return;
   }
 
@@ -504,10 +919,6 @@
     // Beatport is a SPA: button only on release pages
     setInterval(() => { b.style.display = relId() ? 'block' : 'none'; }, 800);
 
-    const nextData = (html) => {
-      const el = html ? new DOMParser().parseFromString(html, 'text/html').getElementById('__NEXT_DATA__') : document.getElementById('__NEXT_DATA__');
-      try { return JSON.parse(el.textContent); } catch (e) { return null; }
-    };
     function onBeatportClick() {
       const id = relId();
       const nd = nextData();
@@ -523,90 +934,80 @@
       }).catch((e) => toast(say('Non riesco a leggere i dati di questa pagina Beatport. ', 'Can\'t read the data on this Beatport page. ') + e.message, false));
     }
 
-    function normalizeBeatport(nd) {
-      const pp = nd.props.pageProps;
-      const r = pp.release;
-      const t0 = (x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
-      // "DAV (Croatia)": the country in brackets is how Beatport tells namesakes apart
-      const bpName = (n) => t0(n).replace(/\s+\((?:[A-Z][a-z]+(?:\s[A-Z][a-z]+)*|UK|US|USA|NL|DE|FR|IT|ES|BR|AR|AU|CA|JP)\)$/, '');
-      const q = (pp.dehydratedState?.queries || []).find((x) => Array.isArray(x.queryKey) && x.queryKey[0] === 'tracks');
-      let list = (q && q.state && q.state.data && q.state.data.results) || [];
-      // the data order is the reverse of the site order: sort by increasing id
-      list = list.slice().sort((a, b2) => (a.id || 0) - (b2.id || 0));
-      const relArtists = (r.artists || []).map((a) => bpName(a.name)).filter(Boolean);
-      const bogus = (n) => /^(remixes|various|various artists|va|v\/a)$/i.test(n);
-      const various = /^various artists$/i.test(t0(r.name)) || relArtists.length >= 5 || relArtists.every(bogus);
-      const artist = various ? 'Various Artists' : relArtists.join(', ');
-      const artistsList = various ? [{ name: 'Various Artists', anv: '', join: '', various: true }] : relArtists.map((n, i) => ({ name: n, anv: '', join: i < relArtists.length - 1 ? ',' : '', various: false }));
-      const tracks = list.map((t, i) => {
-        let title = t0(t.name);
-        const mix = t0(t.mix_name);
-        // "Original Mix" is not written; other versions in brackets, unless already in the name
-        if (mix && !/^original( mix| version)?$/i.test(mix) && !title.toLowerCase().includes(mix.toLowerCase())) title += ' (' + mix + ')';
-        const artists = (t.artists || []).map((a) => bpName(a.name)).filter((n) => n && !bogus(n));
-        return { pos: String(i + 1), title: title.replace(/\|/g, '/'), dur: t0(t.length), artist: artists.join(', '), artists, remixers: (t.remixers || []).map((a) => bpName(a.name)) };
-      });
-      const creditList = [];
-      tracks.forEach((t) => t.remixers.forEach((n) => creditList.push({ name: n, role: 'Remix', tracks: t.pos })));
-      tracks.forEach((t) => { delete t.remixers; });
-      const genres = [...new Set(list.map((t) => t0(t.genre && t.genre.name)).concat(list.map((t) => t0(t.sub_genre && t.sub_genre.name))).filter(Boolean))];
-      let [year, month, day] = (t0(r.new_release_date || r.publish_date).match(/^(\d{4})-(\d{2})-(\d{2})/) || []).slice(1);
-      let oldDate = '';
-      // Beatport exists since 2004: an earlier date is not the digital issue's
-      if (year && +year < 2004) { oldDate = [year, month, day].join('-'); year = month = day = ''; }
-      const label = t0(r.label && r.label.name);
-      const catno = t0(r.catalog_number);
-      const img = r.image && (r.image.dynamic_uri || r.image.uri) ? String(r.image.dynamic_uri || r.image.uri).replace('{w}x{h}', '1400x1400') : '';
-      return {
-        source: 'Beatport',
-        url: 'https://www.beatport.com/release/' + (r.slug || 'release') + '/' + r.id,
-        artist,
-        artistSearch: various ? '' : relArtists[0] || '',
-        artistsList,
-        title: t0(r.name),
-        year: year || '', month: month || '', day: day || '',
-        labels: label ? [{ name: label, catno: catno && catno !== t0(r.upc) ? catno : '', noCat: false }] : [],
-        country: '',
-        formatName: 'File',
-        boxSet: false,
-        various,
-        descriptions: [], formatTexts: [],
-        tracks,
-        credits: [], creditList,
-        genres: genres.length ? ['Electronic'] : [], styles: genres,
-        notes: t0(r.desc),
-        typeHint: '',
-        selfReleased: !label,
-        streaming: r.is_available_for_streaming !== false,
-        lossless: true,
-        oldDate,
-        preorder: !!r.pre_order,
-        artUrl: img, noArt: false
-      };
-    }
     return;
   }
 
+
+  // =====================================================================
+  //  MUSICBRAINZ SIDE (reads the release page data: tracks, credits, works and composers)
+  // =====================================================================
+  if (/(^|\.)musicbrainz\.org$/.test(host)) {
+    if (!/^\/release\/[0-9a-f-]{36}(\/?$|\/?#)/.test(location.pathname + location.hash)) return;
+    floatingButton(() => {
+      try { sendToRym(normalizeMB(document, location)); } catch (e) { toast(say('Non riesco a leggere i dati di questa pagina MusicBrainz. ', 'Can\'t read the data on this MusicBrainz page. ') + e.message, false); }
+    });
+    return;
+  }
+
+  // =====================================================================
+  //  APPLE MUSIC AND DEEZER SIDE (single-page sites: the page is read again when the data is stale)
+  // =====================================================================
+  if (host === 'music.apple.com' || host === 'www.deezer.com') {
+    const apple = host === 'music.apple.com';
+    const onAlbum = () => (apple ? /\/album\//.test(location.pathname) : /\/album\/\d+/.test(location.pathname));
+    const b = floatingButton(() => {
+      const read = (doc) => (apple ? normalizeApple(doc, location) : normalizeDeezer(doc, location));
+      const fail = (e) => toast(say('Non riesco a leggere i dati di questa pagina. ', 'Can\'t read the data on this page. ') + (e && e.message || e), false);
+      if (typeof fetch !== 'function') { try { sendToRym(read(document)); } catch (e) { fail(e); } return; }
+      fetch(location.href, { credentials: 'same-origin' }).then((r) => r.text()).then((h) => {
+        try { sendToRym(read(new DOMParser().parseFromString(h, 'text/html'))); } catch (e) { try { sendToRym(read(document)); } catch (e2) { fail(e2); } }
+      }).catch(() => { try { sendToRym(read(document)); } catch (e) { fail(e); } });
+    });
+    b.style.display = 'none';
+    b.title = say('Invia questa release al modulo Rym', 'Send this release to the Rym form');
+    setInterval(() => { b.style.display = onAlbum() ? 'block' : 'none'; }, 800);
+    return;
+  }
 
   // =====================================================================
   //  Rym SIDE
   // =====================================================================
   if (!host.endsWith('rateyourmusic.com')) return;
   const form = document.getElementById('release_ac');
-  if (!form) return; // only on the "Add Release" page
+  // Rym media link page: panel with the listening links of the imported release
+  if (!form) {
+    const fields = () => [...document.querySelectorAll('form textarea, form input[type=text], form input[type=url], form input:not([type])')].filter((x) => /url|link|embed|media/i.test((x.name || '') + ' ' + (x.id || '') + ' ' + (x.placeholder || '')));
+    if (!/media|link/i.test(location.pathname + location.search) || !fields().length) return;
+    let MD = null;
+    try { MD = JSON.parse(GM_getValue(KEY) || 'null'); } catch (e) { MD = null; }
+    const links = (MD && Array.isArray(MD.mediaLinks) ? MD.mediaLinks : []).filter((x) => x && typeof x.url === 'string' && typeof x.service === 'string');
+    if (!links.length) return;
+    const box = css(document.createElement('div'), { position: 'fixed', right: '16px', bottom: '16px', zIndex: 2147483647, background: '#1e1e1e', color: '#eee', padding: '10px', borderRadius: '8px', fontSize: '12px', maxWidth: '360px', boxShadow: '0 2px 10px rgba(0,0,0,.4)' });
+    box.innerHTML = '<b>Postino – ' + esc0(say('link media', 'media links')) + '</b><div style="opacity:.7;margin:2px 0 6px">' + esc0((MD.artist || '') + ' – ' + (MD.title || '')) + '</div>';
+    links.forEach((l) => box.appendChild(btn(say('Inserisci ', 'Insert ') + l.service, () => {
+      const el = fields().find((x) => !x.value) || fields()[0];
+      if (!el) return toast(say('Campo del link non trovato', 'Link field not found'), false);
+      el.value = l.url; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+      try { GM_setClipboard(l.url); } catch (e) { /* - */ }
+      toast(say('Link inserito (anche negli appunti): ', 'Link inserted (also in the clipboard): ') + l.service);
+    }, '#2a6fdb')));
+    box.appendChild(btn('×', () => box.remove(), '#555'));
+    document.body.appendChild(box);
+    return;
+  }
+  function esc0(x) { return String(x || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
   const W = unsafeWindow;
   let D = null;          // release currently loaded
   let SRC = 'Discogs';
   let rawSeen = null;    // JSON already read (to tell when a new release arrives)
   let filledRaw = null;  // JSON used for the last fill
-  let capsMode = null;   // capitalization: null = automatic (from the language), true = English, false = first letter only
   let durVinyl = false;  // vinyl: import track times (only if printed on the record)
   // what the script changed, so it can be undone before filling another release
   const touched = { attribs: new Set(), notesUrl: '', tracks: false, fields: new Set(), credits: [], radios: new Set() };
   let settingsChanged = false;
-  // capitalization as on the source: for the exceptions allowed by the wiki (names and titles with an official styling)
-  let keepCaps = false;
+  // capitalization: 'auto' | 'en' (English) | 'other' (other language) | 'keep' (as on the source), separate for title and tracklist
+  let capsTitle = 'auto', capsTracks = 'auto';
   let lastReport = null;
   // Saved data: only an object with fields of the expected type (drops corrupted or odd data)
   function sanitize(o) {
@@ -623,6 +1024,8 @@
     o.artistsList = objs(o.artistsList).map((a) => ({ name: str(a.name), anv: str(a.anv), join: str(a.join), various: !!a.various }));
     o.creditList = objs(o.creditList).map((c) => ({ name: str(c.name), role: str(c.role), tracks: str(c.tracks) }));
     o.companies = objs(o.companies).map((c) => ({ name: str(c.name), role: str(c.role) }));
+    o.aliases = arr(o.aliases).filter((x) => typeof x === 'string').slice(0, 30);
+    o.mediaLinks = objs(o.mediaLinks).filter((x) => typeof x.url === 'string' && typeof x.service === 'string').slice(0, 12);
     o.formatsAll = objs(o.formatsAll).map((f) => ({ name: str(f.name), qty: str(f.qty), descriptions: arr(f.descriptions).filter((x) => typeof x === 'string'), text: str(f.text) }));
     o.physical = objs(o.physical).map((p) => ({ format: str(p.format), name: str(p.name), type: str(p.type), desc: str(p.desc), catno: str(p.catno), date: str(p.date), edition: str(p.edition) }));
     o.tracks.forEach((t) => { t.artists = arr(t.artists).filter((x) => typeof x === 'string'); });
@@ -640,8 +1043,7 @@
     if (D && (parsed.savedAt || 0) < (D.savedAt || 0)) return false;
     rawSeen = raw;
     D = parsed;
-    capsMode = null; // new release: capitalization back to automatic
-    keepCaps = false;
+    capsTitle = 'auto'; capsTracks = 'auto';
     durVinyl = false;
     SRC = D.source || 'Discogs';
     return true;
@@ -900,6 +1302,13 @@
     // repeated "Untitled" does not mean "versions of the same track"
     const untitledAll = tracks.every((t) => /^[\[(]?\s*untitled\s*[\])]?$/i.test((t.title || '').trim()));
     if (n >= 2 && bases.size === 1 && !untitledAll) return { type: 'i', reason: n + ' versions of the same track', sure: false };
+    // split or V/A with one track per artist: there is no focal track -> EP, not single (user request)
+    {
+      const ta = tracks.map((t) => ((t.artists || []).length ? t.artists : t.artist ? [t.artist] : []).map(norm).join('|'));
+      if (n >= 2 && n <= 7 && !long && (RMx.mode === 'split' || RMx.mode === 'va' || D.various) && ta.every(Boolean) && new Set(ta).size === n && !desc.includes('Single')) {
+        return { type: 'e', reason: say('split/V/A, un brano per artista', 'split/V/A, one track per artist'), sure: false };
+      }
+    }
     // 7"/10"/12" vinyl that Discogs does not mark as LP: up to 3 tracks single; 4 to 6 EP,
     // unless the total length is over 30 minutes (album). Club 12"s often run over the 28 minutes of an album.
     if (fmt === 95 && ['7"', '10"', '12"'].includes(size) && !desc.includes('LP') && n <= 6) {
@@ -957,6 +1366,9 @@
   const AMBIGUOUS = new Set(['as', 'by', 'in', 'on', 'to', 'but', 'so']); // can be adverbs -> capitalized
   const ACRONYMS = new Set(['DJ', 'MC', 'TV', 'USA', 'UK', 'NYC', 'NY', 'OK', 'EP', 'LP', 'CD', 'DVD', 'BBC', 'MTV', 'VIP', 'UFO', 'USSR', 'R&B', 'BPM', 'SOS', 'ASAP', 'FM', 'DC', 'AI', 'EU', 'UN']);
   const ROMAN = /^X{0,3}(IX|IV|V?I{0,3})$/;
+  const FILE_EXT = new Set(['wav', 'mp3', 'flac', 'aiff', 'aif', 'ogg', 'midi', 'jpg', 'jpeg', 'png', 'pdf', 'exe', 'aac', 'm4a', 'wma', 'mp4', 'mov', 'avi', 'mkv', 'dat']);
+  // common phrasal verbs: the particle is an adverb and is capitalized ("Keep On", "Come In", "Hold On")
+  const PHRASAL = /^(keep|keeps|keepin'?|keeping|kept|come|comes|comin'?|coming|came|hold|holds|holdin'?|holding|held|carry|carries|carryin'?|carrying|carried|turn|turns|turnin'?|turning|turned|hang|hangs|hangin'?|hanging|hung|move|moves|movin'?|moving|moved|log|logs|logged|sign|signs|signed|check|checks|checked|tune|tunes|tuned|plug|plugs|plugged|switch|switches|switched|stand|stands|standing|stood|drop|drops|droppin'?|dropping|dropped|sink|sinks|sinking|sank|give|gives|givin'?|giving|gave|hold|lean|leans|leaning|leaned|pass|passes|passing|passed|walk|walks|walkin'?|walking|walked|stop|stops|stopped|run|runs|running|ran|roll|rolls|rollin'?|rolling|rolled)$/i;
   const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   // Languages with English-like title case but their own exceptions (wiki "Non-English Latin language capitalization")
@@ -985,6 +1397,14 @@
     const key = lower(p.replace(/[’‘]/g, "'"));
     if (/^(\p{L}\.){2,}\p{L}?\.?$/u.test(p) && key !== 'a.k.a.') return mode === 'mixed' ? p : upper(p); // R.E.M.
     if (mode === 'mixed' && /\p{Lu}/u.test(p.replace(/^['’]+/, '').slice(1))) return p; // camelcase or acronym already written (McCartney, DJ, iPad); a leading apostrophe does not count ("'Til")
+    // Roman numerals always uppercase, even from a lowercase source ("iv" -> "IV", "viith" -> "VIIth"; not a lone "I", "V", "X")
+    {
+      const rm = p.match(/^([ivxIVX]{2,})(th|st|nd|rd)?$/);
+      if (rm && ROMAN.test(rm[1].toUpperCase()) && !/^(xx)$/i.test(rm[1])) return rm[1].toUpperCase() + (rm[2] || '').toLowerCase();
+    }
+    // file extensions on their own: uppercase ("A WAV File"); after a name they stay lowercase ("whatever.wav")
+    if (FILE_EXT.has(key)) return p.toUpperCase();
+    if (/^[^.]+\.(\p{L}{2,4})$/u.test(p) && FILE_EXT.has(p.split('.').pop().toLowerCase())) { const b = p.replace(/\.[^.]+$/, ''); return capFirst(b, mode) + '.' + p.split('.').pop().toLowerCase(); }
     if (mode !== 'mixed') {
       const up = p.toUpperCase();
       if (ACRONYMS.has(up)) return up;
@@ -1015,7 +1435,18 @@
     const tokens = seg.split(/(\s+)/);
     const words = tokens.map((t, i) => (/[\p{L}\p{N}]/u.test(t) ? i : -1)).filter((i) => i >= 0);
     const first = words[0], last = words[words.length - 1];
-    return tokens.map((t, i) => (words.includes(i) ? capWord(t, i === first, i === last, mode, flags) : t)).join('');
+    return tokens.map((t, i) => {
+      if (!words.includes(i)) return t;
+      const prev = words[words.indexOf(i) - 1];
+      // particle after a phrasal verb ("on", "in", "by"): capitalized, except "walk on the…", "run to…" (real prepositions)
+      const pk = t.replace(/[^\p{L}']/gu, '').toLowerCase();
+      if (prev != null && /^(on|in|by)$/.test(pk) && PHRASAL.test(tokens[prev].replace(/[^\p{L}']/gu, ''))) {
+        const nx = tokens[words[words.indexOf(i) + 1]] || '';
+        const prep = /^(walk|walks|walkin'?|walking|walked|run|runs|running|ran|stop|stops|stopped|roll|rolls|rollin'?|rolling|rolled|pass|passes|passing|passed|stand|stands|standing|stood|drop|drops|dropped|sink|sinks|sank|lean|leans|leaning|leaned|hang|hangs|hanging|hung)$/i.test(tokens[prev].replace(/[^\p{L}']/gu, '')) && /^(the|a|an|my|your|his|her|our|their|this|that|me|you|him|us|them|it)$/i.test(nx.replace(/[^\p{L}]/gu, ''));
+        if (!prep) return capWord(t, true, i === last, mode, []);
+      }
+      return capWord(t, i === first, i === last, mode, flags);
+    }).join('');
   }
 
   // English rules on one title. "protect" = artist names to keep as they are ("The Best of The Temptations")
@@ -1034,7 +1465,7 @@
     (protect || []).forEach((name) => {
       if (!name || name.length < 3 || isVarious(name)) return;
       const re = new RegExp('(^|[^\\p{L}])(' + escRe(name) + ')(?=$|[^\\p{L}])', 'giu');
-      text = text.replace(re, (all, pre) => pre + name);
+      text = text.replace(re, (all, pre) => pre + capName(name));
     });
     return { text, flags, mode };
   }
@@ -1082,7 +1513,8 @@
     const letters = src.replace(/[^\p{L}]/gu, '');
     const mode = !letters ? 'mixed' : letters === letters.toUpperCase() ? 'upper' : letters === letters.toLowerCase() ? 'lower' : 'mixed';
     // French: after " : ", " ! ", " ? " with a space before, the text goes on in lowercase ("Oxygène : la magie de la musique")
-    const SPLIT = lang === 'fr' ? /(\s*[—()"“”\[\]]\s*|(?<=[^\s:?!])[:?!]\s*|\.\s+|\s+\/\s+|\s+=\s+|\s+[-–]\s+)/ : /(\s*[:?!—()"“”\[\]]\s*|\.\s+|\s+\/\s+|\s+=\s+|\s+[-–]\s+)/;
+    // ": ? !" split sections only when followed by a space or at the end ("Hör!-spiel" stays one word)
+    const SPLIT = lang === 'fr' ? /(\s*[—()"“”\[\]]\s*|(?<=[^\s:?!])[:?!](?:\s+|$)|\.\s+|\s+\/\s+|\s+=\s+|\s+[-–]\s+)/ : /(\s*[—()"“”\[\]]\s*|\s*[:?!](?:\s+|$)|\.\s+|\s+\/\s+|\s+=\s+|\s+[-–]\s+)/;
     const parts = src.split(SPLIT);
     let text = parts.map((seg, i) => {
       if (i % 2) return seg;
@@ -1100,13 +1532,63 @@
     (protect || []).forEach((name) => {
       if (!name || name.length < 3 || isVarious(name)) return;
       const re = new RegExp('(^|[^\\p{L}])(' + escRe(name) + ')(?=$|[^\\p{L}])', 'giu');
-      text = text.replace(re, (all, pre) => pre + name);
+      text = text.replace(re, (all, pre) => pre + capName(name));
     });
     // Dutch: "IJ" is a single letter; leading "'s"/"'t" stay lowercase and the next word is capitalized
     if (lang === 'nl') {
       text = text.replace(/(^|[^\p{L}])Ij(?=\p{L})/gu, '$1IJ');
       text = text.replace(/^(['’])([st])\s+(\p{L})/iu, (all, ap, l, c) => ap + l.toLowerCase() + ' ' + c.toUpperCase());
     }
+    return text;
+  }
+
+  // artist names in Latin script: English rules (wiki §1, §3.5), except deliberate stylings (all lowercase, all caps, camelCase); "The" stays capitalized inside a name
+  function capName(name) {
+    const n = String(name || '');
+    if (!/\p{L}/u.test(n) || /\[Artist\d+/i.test(n) || /(?!\p{Script=Latin})\p{L}/u.test(n)) return n;
+    const L = n.replace(/[^\p{L}]/gu, '');
+    if (L === L.toLowerCase() || L === L.toUpperCase()) return n;
+    const out = capEN(n, []).text.split(/(\s+)/);
+    const src = n.split(/(\s+)/);
+    return out.map((w, i) => (src[i] === 'The' ? 'The' : w)).join('');
+  }
+  // German (wiki "Non-English capitalization" §5.5): capital on the first word of each section and on recognisable nouns (after articles, possessives, "'s", -isch adjectives; -ung, -heit… suffixes); the rest as on the source
+  const DE_ART = new Set("der die das den dem des ein eine einen einem einer eines mein meine meinen meinem meiner dein deine deinen deinem sein seine seinen seinem ihr ihre ihren ihrem unser unsere unseren euer eure kein keine keinen keinem jeder jede jedes jeden dieser diese dieses diesen alle zum zur im am vom beim ins de dat en up'n".split(' '));
+  const DE_NOUN = /\p{L}{2,}(ung|heit|keit|schaft|tion|tät|nis|tum|ling|lein|ismus)(en|e|s|se)?$/u;
+  function capGerman(str, protect) {
+    const src = str || '';
+    const words = src.split(/\s+/).filter((w) => /\p{L}{2,}/u.test(w));
+    const letters = src.replace(/[^\p{L}]/gu, '');
+    // source all caps/lowercase or with every word capitalized ("Es Ist Ein Schnee Gefallen"): start again from lowercase
+    const titled = words.length >= 3 && words.every((w) => /^[^\p{L}]*\p{Lu}/u.test(w));
+    const reset = letters === letters.toUpperCase() || titled;
+    const parts = src.split(/(\s*[—()"“”\[\]]\s*|\s*[:?!](?:\s+|$)|\.\s+|\s+\/\s+|\s+=\s+|\s+[-–]\s+)/);
+    const up1 = (w) => w.replace(/\p{L}/u, (c) => c.toUpperCase());
+    let text = parts.map((seg, i) => {
+      if (i % 2) return seg;
+      const toks = seg.split(/(\s+)/);
+      const ws = toks.map((t, k) => (/\p{L}/u.test(t) ? k : -1)).filter((k) => k >= 0);
+      const bare = (k) => (k == null ? '' : toks[k].replace(/[^\p{L}']/gu, '').toLowerCase());
+      return toks.map((t, k) => {
+        const j = ws.indexOf(k);
+        if (j < 0) return t;
+        let w = t;
+        if (reset && !/^(\p{L}\.){2,}/u.test(w) && !ACRONYMS_SAFE.has(w.toUpperCase())) w = w.toLowerCase();
+        if (j === 0) return up1(w);
+        const pv = bare(ws[j - 1]), nx = bare(ws[j + 1]);
+        const b = bare(k);
+        if (DE_ART.has(b)) return w;
+        // after an article/possessive: a noun, unless another article follows (then it is a verb: "de hät en Thaler")
+        if (DE_ART.has(pv) && (!DE_ART.has(nx) || /[,;.]$/.test(t))) return up1(w);
+        if (/'s$/.test(pv) || /isch(e|en|er|es|em)?$/.test(pv)) return up1(w);
+        if (DE_NOUN.test(b)) return up1(w);
+        return w;
+      }).join('');
+    }).join('');
+    (protect || []).forEach((name) => {
+      if (!name || name.length < 3 || isVarious(name)) return;
+      text = text.replace(new RegExp('(^|[^\\p{L}])(' + escRe(name) + ')(?=$|[^\\p{L}])', 'giu'), (all, pre) => pre + capName(name));
+    });
     return text;
   }
 
@@ -1157,11 +1639,16 @@
   }
 
   // language only with strong hints (script, typical letters, at least 2 known words)
+  // words for the language: without dotted acronyms ("N.W.O." is not the Portuguese "o")
+  const langWords = (text) => (text || '').toLowerCase().replace(/(?:\p{L}\.){2,}\p{L}?\.?/gu, ' ').replace(/[’]/g, "'").replace(/(^|\s)(o|n)'(?=\s|$)|'n'/g, ' ').replace(/'/g, '').split(/[^\p{L}]+/u).filter(Boolean);
+  // German letters: ß, ä, or ö/ü with German clusters (sch, ei, ie…), and no letters of other languages (Turkish has ö/ü)
+  const germanLetters = (t) => (/[ßä]/i.test(t || '') || (/[öü]/i.test(t || '') && /sch|ch|ei|ie|tz|pf|ck/i.test(t || ''))) && !/[ğışåøæőűéèêàâçñõã]/i.test(t || '');
   function detectLangStrong(text) {
     const scr = scriptOf(text || '');
     if (scr) return scr;
     if (/[ğış]|İ/u.test(text || '')) return 'tr';
-    const words = (text || '').toLowerCase().replace(/[’']/g, '').split(/[^\p{L}]+/u).filter(Boolean);
+    if (germanLetters(text)) return 'de';
+    const words = langWords(text);
     const known = words.filter((w) => Object.keys(LANG_SETS).some((k) => LANG_SETS[k].has(w))).length;
     return known >= 2 ? detectLang(text, true) : 'unknown';
   }
@@ -1171,11 +1658,12 @@
     if (scr) return scr;
     // letters typical of Turkish
     if (/[ğış]|İ/u.test(text || '')) return 'tr';
+    if (germanLetters(text)) return 'de';
     const score = {};
     let hits = 0; // words found in at least one list
     Object.keys(LANG_SETS).forEach((k) => { score[k] = 0; });
-    // drop English contractions ("o'", "'n'") that would look like articles of other languages
-    (text || '').toLowerCase().replace(/[’]/g, "'").replace(/(^|\s)(o|n)'(?=\s|$)|'n'/g, ' ').replace(/'/g, '').split(/[^\p{L}]+/u).filter(Boolean).forEach((w) => {
+    // without English contractions ("o'", "'n'"), acronyms and single letters
+    langWords(text).forEach((w) => {
       const langs = Object.keys(LANG_SETS).filter((k) => LANG_SETS[k].has(w));
       if (langs.length) hits++;
       langs.forEach((k) => { score[k] += 1 / langs.length; });
@@ -1200,6 +1688,7 @@
   //  - sides: "A01" -> "A1"; non-standard sides ("AA", "AA1", "BB") -> A, B, C... in order
   //  - only one track on the side: "A1" -> "A"
   //  - numbers: "01" -> "1"
+  let sidesGuessed = false, lettersRenumbered = false;
   const MEDIA_LABEL = { cd: 'CD', dvd: 'DVD', bluray: 'Blu-ray', bd: 'Blu-ray', sacd: 'SACD', vhs: 'VHS' };
   function normPositions(rows) {
     const tracks = rows.filter((t) => !t.header);
@@ -1222,6 +1711,25 @@
       if (m) { t.media = MEDIA_LABEL[m[1].toLowerCase().replace('-', '')]; p = m[2]; }
       t.pos = p;
     });
+    // 1b) trailing letters as normal tracks ("A1a, A1b, A2" -> "A1, A2, A3"; "1a, 1b, 2" -> "1, 2, 3"); not with headings (indexes) nor parallel grooves
+    if (!rows.some((r) => r.header) && tracks.some((t) => /^([A-Z]?)\d+[a-z]$/.test(t.pos)) && tracks.every((t) => /^([A-Z]?)\d*[a-z]?$/.test(t.pos))) {
+      const cnt = {};
+      tracks.forEach((t) => { const L = (t.pos.match(/^[A-Z]?/) || [''])[0]; cnt[L] = (cnt[L] || 0) + 1; t.pos = L + cnt[L]; });
+      lettersRenumbered = true;
+    }
+    // 1c) vinyl with numeric-only positions (source error): tracks split in half per side, A/B/C/D… for several discs
+    sidesGuessed = false;
+    if (isVinyl() && !rows.some((r) => r.header) && tracks.length >= 2 && tracks.every((t) => /^\d+$/.test(t.pos) && !t.disc && !t.media)) {
+      const discsN = Math.max(1, +(((D.formatsAll || []).find((f) => /vinyl|shellac|lathe/i.test(f.name)) || {}).qty) || 1);
+      const sides = Math.min(2 * discsN, tracks.length);
+      const baseN = Math.floor(tracks.length / sides), extra = tracks.length % sides;
+      let k = 0;
+      for (let si = 0; si < sides; si++) {
+        const size = baseN + (si < extra ? 1 : 0);
+        for (let j = 1; j <= size; j++) tracks[k++].pos = String.fromCharCode(65 + si) + j;
+      }
+      sidesGuessed = extra > 0 ? 'odd' : true;
+    }
 
     // 2) disc number ("1-3", "2.10")
     tracks.forEach((t) => {
@@ -1354,6 +1862,8 @@
     const ownKeys = [D.artist, D.artistSearch].concat((D.artistsList || []).map((a) => a.name)).filter(Boolean).map(nameKey);
     const isOwn = (who) => { const k = nameKey(who.replace(/['’]s$/i, '')); return !k || ownKeys.some((o) => o === k || (o.length >= 4 && k.includes(o))); };
     const isRemix = (t) => {
+      // fused words ending in "mix" ("Bizzaremix", "Viamix"): remix versions
+      if (/(?:^|[^\p{L}])\p{L}{3,}(?:re)?mix(?:es)?(?=$|[^\p{L}])/iu.test(t.title || '') && !/(?:^|[^\p{L}])(megamix|premix|minimix)/i.test(t.title || '')) return true;
       const groups = [...(t.title || '').matchAll(/[(\[]([^()\[\]]+)[)\]]/g)].map((m) => m[1].trim());
       if (!groups.length) return PERF.remix.test(t.title || '');
       return groups.some((inner) => {
@@ -1376,11 +1886,12 @@
     const remixed = (t) => isRemix(t) || byCredit.has(t);
     const focalT = n ? (tracks.find((t) => t.title === focal) || tracks[0]) : null;
     let remixShare = isSingle ? (focalT && remixed(focalT) ? 1 : 0) : (n ? tracks.filter(remixed).length / n : 0);
-    if (/\b(the\s+)?remix(es|ed)\b|\bremix\s+ep\b|\brmxs\b/i.test(title)) remixShare = 1;
+    // release title with "(Remix)", "(Remixes)", "Remixed", "(The Mixes)": the whole release
+    if (/\b(the\s+)?remix(es|ed)\b|\bremix\s+ep\b|\brmxs\b|[(\[]\s*(remix|the\s+mixes|mixes)\s*[)\]]|\bthe\s+mixes\b/i.test(title)) remixShare = 1;
     if (remixShare > 0.5) out.push([24, 'Remixes', isSingle ? 'focal track is a remix' : pct(remixShare)]);
 
     // Selector Comp: unmixed V/A compilation with a credited compiler
-    if ((D.various || releaseMode().byCompiler) && D.compiledBy && !desc.includes('Mixed')) {
+    if ((D.various || releaseMode().byCompiler) && (D.compiledBy || releaseMode().byCompiler) && !desc.includes('Mixed')) {
       out.push([10, 'Selector Comp', 'credited compiler']);
       warn.push('Selector Comp: add the compiler in the credits (role "compiler").');
     }
@@ -1428,7 +1939,16 @@
   // Capitalization mode for the current release (checkbox state)
   // Release language: majority vote of the recognisable titles (English vs non-English);
   // with fewer than 3 votes or a tie, all the words together decide.
-  function releaseLang() {
+  // record language and whether it is reliable: at least 3 titles recognised for that language or strong hints
+  function releaseLangInfo() {
+    const lang = releaseLang0();
+    const titles = [D.title].concat((D.tracks || []).map((t) => t.title)).filter(Boolean);
+    const per = titles.map((t) => detectLang(t, true));
+    const n = per.includes(lang) ? per.filter((l) => l === lang || (l === 'xx' && lang !== 'en')).length : 0;
+    const strong = titles.filter((t) => detectLangStrong(t) === lang).length;
+    return { lang, sure: !['unknown', 'xx'].includes(lang) && (n >= 3 || strong >= 2) };
+  }
+  function releaseLang0() {
     const titles = [D.title].concat((D.tracks || []).map((t) => t.title)).filter(Boolean);
     const votes = {};
     titles.forEach((t) => { const l = detectLang(t, true); if (l !== 'unknown') votes[l] = (votes[l] || 0) + 1; });
@@ -1444,12 +1964,15 @@
     return detectLang(titles.join(' '));
   }
 
-  function capsState() {
-    const lang = releaseLang();
-    if (keepCaps) return { english: capsMode !== false, auto: false, lang, hold: 'keep' };
-    if (capsMode !== null) return { english: capsMode, auto: false, lang, hold: null };
-    if (D.classical) return { english: false, auto: true, lang, hold: 'classical' };
-    return { english: lang === 'en' || lang === 'unknown', auto: true, lang, hold: null };
+  function capsState(which) {
+    const L = releaseLangInfo();
+    const sel = which === 'tracks' ? capsTracks : capsTitle;
+    const base = { lang: L.lang, sure: L.sure, sel };
+    if (sel === 'keep') return Object.assign(base, { english: false, auto: false, hold: 'keep' });
+    if (sel === 'en') return Object.assign(base, { english: true, auto: false, hold: null });
+    if (sel === 'other') return Object.assign(base, { english: false, auto: false, hold: null });
+    if (D.classical) return Object.assign(base, { english: false, auto: true, hold: 'classical' });
+    return Object.assign(base, { english: L.lang === 'en' || L.lang === 'unknown', auto: true, hold: null });
   }
   // Mode for a single title: 'en' (English), 'sent' (first letter only), 'keep' (leave as is).
   // In automatic mode it decides title by title (records with songs in several languages); without hints the release language applies.
@@ -1457,15 +1980,24 @@
     const scr = scriptOf(str || '');
     if (scr === 'zz') return { m: 'keep' };
     if (scr === 'ru') return { m: 'sent', lang: 'ru' };
-    if (!C.auto) return C.english ? { m: 'en' } : { m: 'sent', lang: C.lang };
+    if (!C.auto && C.english) return { m: 'en' };
+    if (!C.auto) {
+      // "Other language": German with capitalized nouns, the others first letter only
+      const lo = detectLangStrong(str) !== 'unknown' ? detectLang(str, true) : C.lang;
+      if (lo === 'de' || (lo !== 'en' && C.lang === 'de')) return { m: 'de' };
+      if (TITLE_LANGS[lo]) return { m: 'title', lang: lo };
+      return { m: 'sent', lang: ['en', 'unknown'].includes(lo) ? (['en', 'unknown'].includes(C.lang) ? '' : C.lang) : lo };
+    }
     let lt = detectLang(str, true);
     if (lt === 'unknown') lt = C.lang;
-    // weak hints in the title: the record language wins, so titles of the same record follow the same rules
-    if (C.lang && !['unknown', 'xx'].includes(C.lang) && detectLangStrong(str) === 'unknown') lt = C.lang;
+    // weak hints in the title: the record language wins, but only when it is reliable (otherwise "Perturbation Theory" would become Portuguese)
+    if (C.sure && detectLangStrong(str) === 'unknown') lt = C.lang;
     // "non-English" title without a precise language: the record language applies (French, Dutch…)
     if (lt === 'xx' && C.lang && !['en', 'unknown', 'xx'].includes(C.lang)) lt = C.lang;
     if (TITLE_LANGS[lt]) return { m: 'title', lang: lt };
-    if (lt === 'de' || lt === 'zz') return { m: 'keep' }; // German: nouns are capitalized
+    // German: capitalized nouns (wiki §5.5)
+    if (lt === 'de') return { m: 'de' };
+    if (lt === 'zz') return { m: 'keep' };
     return lt === 'en' || lt === 'unknown' ? { m: 'en' } : { m: 'sent', lang: lt };
   }
 
@@ -1491,11 +2023,189 @@
     x = x.replace(/\|/g, '/');
     // "Vol.1" -> "Vol. 1" (also Pt., No., Op., Nr., Ch., Bk., Mvt.)
     x = x.replace(/\b(Vol|Pt|No|Op|Nr|Ch|Bk|Mvt)\.(?=\d)/gi, '$1. ');
+    // "RMX"/"Rmx" -> "Remix" (user request)
+    x = x.replace(/\b(rmx|rmxd)\b/gi, (m) => (/d$/i.test(m) ? 'Remixed' : 'Remix'));
     return x.replace(/\s{2,}/g, ' ').trim();
   }
 
   // How to file the release (wiki "Add a release"): V/A with 5+ artists, split with 2-4 (filed under each),
   // collaboration for "A & B"; "feat."/"with" in the release artist = credits, not file under
+  // ---- classical music (wiki "Classical music") ----
+  // composition credits: they go on the works, never in the release credits
+  const COMPOSE_ROLE = /^(composed|composer|music by|written[- ]by|lyrics by|libretto|arranged by|arranger|words by|text by|orchestrated by|transcribed by)/i;
+  const COMPOSER_ONLY = /^(composed|composer|music by|written[- ]by)/i;
+  // roles that are not performance (technical, artwork, notes…)
+  const NONPERF_ROLE = /engineer|produc|design|art direction|artwork|photo|liner|notes|master|mix|record|edit|lacquer|cover|layout|supervis|translat|illustr|compil|executive|a&r|manage|copyright|lyrics|libretto|composed|composer|written|arrang|music by|text by|words by|transcri|orchestrat|booklet|paint|graphic|typograph|cut by|transfer|restor|technician|assistant|coordinat|consultant|research|publish|sleeve|logo|concept|tape op|balance|programm|liaison|commission|dedicat|sponsor|copy|presenter|other/i;
+  const ORCH_NAME = /orchest|philharmoni|symphon|sinfoni|filarm|camerata|staatskapelle|gewandhaus/i;
+  const CHOIR_NAME = /choir|\bchor\b|chorus|\bcoro\b|chœur|choeur|voices|singers|cantores|schola|chorale|kantorei/i;
+  const ENS_NAME = /ensemble|quartet|quartett|quatuor|cuarteto|quartetto|kwartet|\btrio\b|quintet|sextet|septet|octet|consort|players|collegium|\bduo\b|akademie|academy|soloists/i;
+  const rolesOf = (c) => String(c.role || '').split(/,\s*(?![^\[]*\])/).map((r) => r.trim()).filter(Boolean);
+  const fold = (x) => String(x || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  // wiki order: orchestra, choir/ensemble, conductor, soloists
+  function perfRank(name, roles) {
+    const r = roles.join(' ');
+    if (/orchestra/i.test(r) || ORCH_NAME.test(name)) return 0;
+    if (/choir|chorus|ensemble|strings|quartet/i.test(r) || CHOIR_NAME.test(name) || ENS_NAME.test(name)) return 1;
+    if (/conductor|directed|chorus ?master|choirmaster/i.test(r)) return 2;
+    return 3;
+  }
+  // tracks of a credit ("1 to 5", "A1, B2", empty = all) -> row indices; null when unclear
+  function pickRows(spec, T) {
+    const rows = T.tracks.filter((t) => !t.header);
+    if (!String(spec || '').trim()) return rows.map((t, i) => i);
+    const key = (p) => String(p || '').trim().toUpperCase().replace(/\.$/, '');
+    const idx = new Map();
+    rows.forEach((t, i) => { if (!idx.has(key(t.orig))) idx.set(key(t.orig), i); });
+    const out = new Set();
+    for (const part of String(spec).split(/\s*[,&]\s*/).filter(Boolean)) {
+      let r = part.split(/\s+to\s+/i);
+      if (r.length === 1 && !idx.has(key(part)) && /[-–]/.test(part)) r = part.split(/\s*[-–]\s*/);
+      const a = idx.get(key(r[0])), b = r.length > 1 ? idx.get(key(r[r.length - 1])) : a;
+      if (a == null || b == null) return null;
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) out.add(i);
+    }
+    return [...out];
+  }
+  // share of the release: by duration when every track has one, otherwise by track count
+  function shareOf(list, T) {
+    const rows = T.tracks.filter((t) => !t.header);
+    if (!list || !rows.length) return null;
+    const secs = rows.map((t) => durSec(t.dur));
+    if (secs.every((x) => x > 0)) return list.reduce((a, i) => a + secs[i], 0) / secs.reduce((a, b) => a + b, 0);
+    return list.length / rows.length;
+  }
+  // performers and composers for "File under", credited name (wiki "Classical music" §2.2, §2.3, §2.6)
+  function classicalPlan(T) {
+    const comps = new Map(), perfs = new Map();
+    const add = (map, name, spec, roles) => {
+      const k = norm(name);
+      if (!k) return;
+      if (!map.has(k)) map.set(k, { name, roles: [], rows: new Set(), unknown: false, order: map.size });
+      const x = map.get(k);
+      (roles || []).forEach((r) => { if (!x.roles.includes(r)) x.roles.push(r); });
+      const list = pickRows(spec, T);
+      if (list) list.forEach((i) => x.rows.add(i)); else x.unknown = true;
+    };
+    (D.creditList || []).forEach((c) => {
+      const roles = rolesOf(c);
+      if (roles.some((r) => COMPOSER_ONLY.test(r))) add(comps, c.name, c.tracks);
+      const pr = roles.filter((r) => !NONPERF_ROLE.test(r));
+      if (pr.length) add(perfs, c.name, c.tracks, pr);
+    });
+    // cover artists: composers ("Composer - Performers") or performers; whoever composes and plays stays a performer
+    const list = (D.artistsList || []).filter((a) => !a.various && !isVarious(a.name));
+    const cover = [];
+    list.forEach((a, i) => {
+      const k = norm(a.name);
+      const plays = perfs.has(k);
+      const writes = comps.has(k) || (!plays && i < list.length - 1 && /^[-–:]$/.test((a.join || '').trim()));
+      if (writes && !comps.has(k)) add(comps, a.name, '');
+      if (!writes || plays) {
+        if (!perfs.has(k)) add(perfs, a.name, '', []);
+        cover.push(a);
+      }
+    });
+    const sh = (x) => (x.unknown ? null : shareOf([...x.rows], T));
+    const big = (x) => x.share == null || x.share >= 0.25;
+    const composers = [...comps.values()].map((x) => ({ name: x.name, share: sh(x), rows: x.rows }));
+    const coverIdx = (n) => cover.findIndex((c) => norm(c.name) === norm(n));
+    const all = [...perfs.values()].map((x) => ({ name: x.name, roles: x.roles, share: sh(x), rank: perfRank(x.name, x.roles), cov: coverIdx(x.name), order: x.order }));
+    const byRank = (a, b) => a.rank - b.rank || (a.cov - b.cov) || (a.order - b.order);
+    let credited = all.filter((x) => x.cov >= 0).sort(byRank);
+    let uncredited = [];
+    let va = false;
+    // with a quartet/ensemble the single players are usually its members: they do not go in file under
+    const smallGroup = (l) => l.some((x) => ENS_NAME.test(x.name) || /ensemble|strings|quartet/i.test(x.roles.join(' ')));
+    if (!credited.length) {
+      // only the composer on the cover: performers on at least 25%, otherwise Various Artists
+      const bigs = all.filter((x) => x.share != null && x.share >= 0.25);
+      credited = bigs.filter((x) => x.rank <= 2 || !smallGroup(bigs)).sort(byRank);
+      if (!credited.length) va = true;
+    } else {
+      // uncredited (25%+): groups, conductors and soloists
+      const group = smallGroup(credited);
+      uncredited = all.filter((x) => x.cov < 0 && x.share != null && x.share >= 0.25 && (x.rank <= 2 || !group)).sort(byRank);
+    }
+    // 1.4 credited name: performers written with "&", "and", "und"… (not "/" or ",") -> "Use:" with the cover wording
+    let creditedName = '', first = '';
+    const cv = cover.filter((c) => credited.some((x) => norm(x.name) === norm(c.name)));
+    if (cv.length >= 2 && cv.slice(0, -1).some((c) => !/^(\/|,|-|–|;|)$/.test((c.join || '').trim()))) {
+      creditedName = cv.map((c, i) => {
+        const j = (c.join || '').trim();
+        const name = c.anv || c.name;
+        if (i === cv.length - 1) return name;
+        if (j === ',') return name + ', ';
+        if (/^(\/|-|–|;|)$/.test(j)) return name + ' / ';
+        return name + ' ' + j.replace(/^(and|und|et|e|y|with)\b/i, (w) => w.toLowerCase()) + ' ';
+      }).join('').replace(/\s{2,}/g, ' ').trim();
+      const p0 = all.find((x) => norm(x.name) === norm(cv[0].name));
+      const w = (cv[0].anv || cv[0].name).split(/\s+/);
+      if (p0 && p0.rank >= 2 && w.length >= 2) first = w[0];
+    }
+    return { composers, filedComposers: composers.filter(big), credited, uncredited, va, creditedName, first, all };
+  }
+  // composer/performer names (surname too) in a piece of a title: "Beethoven", "Arditti Quartet, Pascal Pongy"
+  function namesOnly(seg, CP) {
+    const names = [];
+    CP.composers.map((x) => Object.assign({ rank: 9 }, x)).concat(CP.all).forEach((x) => {
+      const n = fold(x.name).replace(/\s*\(\d+\)$/, '');
+      names.push(n);
+      // the surname alone counts for composers and people, not for groups ("Quartet")
+      const last = n.split(/\s+/).pop();
+      if (x.rank >= 2 && last && last.length >= 4 && last !== n) names.push(last);
+    });
+    let t = ' ' + fold(seg) + ' ';
+    names.sort((a, b) => b.length - a.length).forEach((n) => { t = t.split(n).join(' '); });
+    return !/\p{L}/u.test(t.replace(/\b(the|and|und|et|e|y|with|conducted by|cond|dir|plays|performs)\b/g, ' ')) && fold(seg).trim() !== '';
+  }
+  // classical title and headings (wiki "Classical music" §2.5, §2.8)
+  function classicalTexts(res) {
+    const CP = classicalPlan(res);
+    res.cplan = CP;
+    const t0 = res.title;
+    let t = t0;
+    for (let k = 0; k < 3; k++) {
+      let m = t.match(/^(.+?)\s*(?::|\s[-–])\s+(.+)$/);
+      if (m && namesOnly(m[1], CP)) { t = m[2].trim(); continue; }
+      m = t.match(/^(.+?)\s*[(\[]([^()\[\]]+)[)\]]\s*$/);
+      if (m && namesOnly(m[2], CP)) { t = m[1].trim(); continue; }
+      m = t.match(/^(.+)\s+[-–]\s+(.+?)$/);
+      if (m && namesOnly(m[2], CP)) { t = m[1].trim(); continue; }
+      break;
+    }
+    // works by the same composer separated by ";" (with different composers "/" stays)
+    if (CP.composers.length === 1 && / \/ /.test(t)) t = t.split(/\s+\/\s+/).join('; ');
+    if (t && t !== t0) { res.title = t; res.log.push(say('Classica, titolo: ', 'Classical, title: ') + t0 + ' → ' + t); }
+    // headings: composer-name-only ones are removed; a work in a single track becomes the track itself
+    const out = [];
+    const rows = res.tracks;
+    for (let i = 0; i < rows.length; i++) {
+      const h = rows[i];
+      if (!h.header || h.mediaHeading) { out.push(h); continue; }
+      if (namesOnly(h.title, CP)) continue;
+      let n = 0;
+      for (let j = i + 1; j < rows.length && !rows[j].header; j++) n++;
+      if (n === 1) {
+        const nx = rows[i + 1];
+        if (fold(nx.title).replace(/\W+/g, '') !== fold(h.title).replace(/\W+/g, '')) nx.title = h.title + ': ' + nx.title;
+        continue;
+      }
+      out.push(h);
+    }
+    res.tracks = out;
+    // for the work search: parent work and composer of every row
+    let parent = '', ri = -1;
+    const solo = CP.composers.length === 1 ? CP.composers[0].name : '';
+    res.tracks.forEach((r) => {
+      if (r.header) { parent = r.title; r.work = r.title; return; }
+      ri++;
+      r.work = parent || r.title;
+      const c = CP.composers.find((x) => x.rows.has(ri));
+      r.composer = c ? c.name : solo;
+    });
+    res.tracks.forEach((r, i) => { if (r.header) { const nx = res.tracks.slice(i + 1).find((x) => !x.header); r.composer = nx ? nx.composer : solo; } });
+  }
+
   function releaseMode() {
     const list = (D.artistsList || []).length ? D.artistsList : (D.artist ? [{ name: D.artistSearch || D.artist, anv: '', join: '' }] : []);
     const fileUnder = [], featured = [], guests = [];
@@ -1513,6 +2223,9 @@
         else joinKind = joinKind || 'collab';
       }
     });
+    // mixtape: hosts only go in the credits, never in file under (Release types §5)
+    const hostK = (D.creditList || []).filter((c) => /\bhost(ed)?\b/i.test(c.role || '')).map((c) => norm(c.name));
+    if (hostK.length && fileUnder.some((n) => !hostK.includes(norm(n)))) for (let i = fileUnder.length - 1; i >= 0; i--) if (hostK.includes(norm(fileUnder[i]))) fileUnder.splice(i, 1);
     const distinct = [];
     (D.tracks || []).filter((t) => !t.header).forEach((t) => {
       const names = (t.artists || []).length ? t.artists : (t.artist && !isVarious(t.artist) ? [t.artist] : []);
@@ -1520,13 +2233,22 @@
     });
     let mode = 'single';
     // the release artist is who compiled/presented the collection and the tracks are by others: it is a V/A
-    const compilers = (D.compilers || []).map(norm);
+    // also from the structured credits: works with data sent by an older version too
+    const compilers = [...new Set((D.compilers || []).concat((D.creditList || []).filter((c) => COMPILER_ROLE.test(c.role || '') && !c.tracks).map((c) => c.name)))].map(norm);
     const byCompiler = fileUnder.length > 0 && fileUnder.every((n) => compilers.includes(norm(n))) && distinct.filter((n) => !compilers.includes(norm(n))).length >= 2;
     if (D.classical) mode = 'classical';
     else if (byCompiler) mode = 'va';
     else if (D.various) mode = distinct.length >= 5 || distinct.length < 2 ? 'va' : 'split';
     // 2-4 artists: split when each track has its own artist, collaboration when the tracks carry no names (written together)
-    else if (fileUnder.length >= 2 && fileUnder.length <= 4) mode = distinct.length >= 2 ? 'split' : 'collab';
+    else if (fileUnder.length >= 2 && fileUnder.length <= 4) {
+      // each track by just one of the artists -> split; all together or no names -> collaboration; mixed or outside artists -> not applicable
+      const rel = fileUnder.map(norm);
+      const per = (D.tracks || []).filter((t) => !t.header).map((t) => ((t.artists || []).length ? t.artists : t.artist && !isVarious(t.artist) ? [t.artist] : []).map(norm));
+      if (per.every((a) => !a.length)) mode = 'collab';
+      else if (per.every((a) => a.length === 1 && rel.includes(a[0])) && distinct.length >= 2) mode = 'split';
+      else if (per.every((a) => rel.every((r) => a.includes(r)) && a.every((x) => rel.includes(x)))) mode = 'collab';
+      else mode = 'mixed';
+    }
     else if (fileUnder.length >= 2) mode = joinKind === 'split' ? 'split' : 'collab';
     // tracks with their own artists, different from the release ones: "Artist - Title" also outside V/A
     const others = distinct.filter((n) => !fileUnder.some((f) => norm(f) === norm(n)));
@@ -1537,6 +2259,7 @@
   // go in bold: [b]Title[/b].
   function prepare() {
     const res = prepareTexts();
+    if (D.classical) classicalTexts(res);
     // untitled tracks: "[untitled]" (Rym wiki, "Add release information" §17.1), after capitalization
     let untitled = 0;
     res.tracks.forEach((t) => {
@@ -1564,11 +2287,15 @@
 
   // several artists: "A & B", "A, B & C" (parts with feat./vs./x stay as they are)
   function joinNames(str) {
-    return String(str || '').split(/(\s+(?:feat\.?|ft\.?|featuring|vs\.?|with|x|pres\.?|presents)\s+)/i).map((seg, i) => {
+    // "[Artist123,Name]" codes are not split on the comma
+    const keep = [];
+    const hidden = String(str || '').replace(/\[(?:Artist|Label|Work)\d+[^\]]*\]/gi, (m) => { keep.push(m); return '\u0001' + (keep.length - 1) + '\u0001'; });
+    const out = hidden.split(/(\s+(?:feat\.?|ft\.?|featuring|vs\.?|with|x|pres\.?|presents)\s+)/i).map((seg, i) => {
       if (i % 2) return seg;
-      const n = seg.split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean);
-      return n.length < 2 ? seg : n.length === 2 ? n.join(' & ') : n.slice(0, -1).join(', ') + ' & ' + n[n.length - 1];
+      const n = seg.split(/\s*,\s*|\s+&\s+/).map((x) => x.trim()).filter(Boolean).map((x) => (/\u0001/.test(x) ? x : capName(x)));
+      return n.length < 2 ? (n[0] || seg) : n.length === 2 ? n.join(' & ') : n.slice(0, -1).join(', ') + ' & ' + n[n.length - 1];
     }).join('');
+    return out.replace(/\u0001(\d+)\u0001/g, (m, k) => keep[+k]);
   }
 
   // Title and tracks with Rym positions and fixed capitalization
@@ -1595,6 +2322,25 @@
         res.titleCat = code.toUpperCase();
         res.log.push(say('Sigla di catalogo tolta dal titolo: ', 'Catalog code removed from the title: ') + res.titleCat);
         res.title = rest.trim();
+      }
+    }
+    // release title or catalog code repeated at the end of many tracks ("Preasure (VA - Summer Mind 3)", "Song [CMX001]"): removed from the tracks
+    {
+      const key = (x) => String(x || '').toLowerCase().replace(/^\s*(v\/a|va|various artists)\s*[-–:]\s*/i, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const relKey = key(res.title);
+      const SUF = /\s*(?:[(\[]([^()\[\]]+)[)\]]|\s[-–]\s+([^-–]+))\s*$/;
+      const sufOf = (t) => { const m = (t.title || '').match(SUF); return m ? (m[1] || m[2] || '').trim() : ''; };
+      const counts = {};
+      const rowsT = tracks.filter((t) => !t.header);
+      rowsT.forEach((t) => { const x = key(sufOf(t)); if (x) counts[x] = (counts[x] || 0) + 1; });
+      const codeLike = (x) => /^[a-z]{2,8}\s?\d{2,5}[a-z]?$/i.test(x);
+      const drop = Object.keys(counts).filter((x) => counts[x] >= 2 && counts[x] >= rowsT.length / 2 && ((relKey && (x === relKey || x.includes(relKey) || relKey.includes(x) && x.length > 4)) || codeLike(x) || (D.labels || []).some((l) => key(l.catno) === x)));
+      if (drop.length) {
+        let n = 0;
+        rowsT.forEach((t) => { if (drop.includes(key(sufOf(t)))) { t.title = t.title.replace(SUF, '').trim(); n++; } });
+        res.log.push(say('Tolto dalle tracce il titolo/catalogo ripetuto: ', 'Repeated title/catalog removed from the tracks: ') + n);
+        const code = drop.find(codeLike);
+        if (code && !res.titleCat) res.titleCat = code.toUpperCase().replace(/\s/g, '');
       }
     }
     // V/A: "/ Various Artists", "- VA", "(V/A)", "VA - " are not part of the title (unless the title is just that)
@@ -1626,6 +2372,12 @@
       const [a, ...rest] = t.title.split(/\s+=\s+/);
       t.title = a + ' (' + rest.join(' / ') + ')'; transl++;
     });
+    // "Күһүннүү Уураһыы / Autumn Kiss": non-Latin part + Latin translation -> translation in brackets (Add release information §17.2)
+    tracks.forEach((t) => {
+      if (t.header || !/\s\/\s/.test(t.title)) return;
+      const p = t.title.split(/\s+\/\s+/);
+      if (p.length === 2 && hasNonLatin(p[0]) && !hasNonLatin(p[1]) && /\p{L}/u.test(p[1])) { t.title = p[0] + ' (' + p[1] + ')'; transl++; }
+    });
     if (transl) res.log.push(say('Traduzioni nelle tracce messe tra parentesi: ', 'Translations in tracks put in brackets: ') + transl);
     // generic soundtrack subtitles: redundant with the attributes, they are removed (wiki, 2021)
     const GENERIC_ST = /\s*(?:[(\[]\s*|[:\-–]\s+)(?:(?:the\s+)?original\s+)?(?:(?:music|songs?)\s+(?:from\s+)?(?:and\s+inspired\s+by\s+)?(?:the\s+)?(?:original\s+)?(?:motion\s+picture|film|movie|netflix\s+(?:film|series)|(?:television|tv)(?:\s+series)?|series|video\s*game|game|musical)(?:\s+soundtrack)?|(?:(?:motion\s+picture|film|movie|television|tv|series|video\s*game|game|(?:original\s+)?(?:broadway\s+)?cast)\s+)?(?:soundtrack|score|cast\s+recording)(?:\s+(?:album|recording))?)\s*[)\]]?\s*$/i;
@@ -1641,7 +2393,13 @@
     tracks.forEach((t) => { if (!t.header && ORIGINAL.test(t.title)) { t.title = t.title.replace(ORIGINAL, ''); origCut++; } });
     if (ORIGINAL.test(res.title)) res.title = res.title.replace(ORIGINAL, '');
     if (origCut) res.log.push('Removed "(Original Mix)" / "(Original)" from ' + origCut + ' tracks');
+    lettersRenumbered = false;
     res.tracks = normPositions(tracks);
+    if (sidesGuessed) {
+      res.log.push(say('Vinile con posizioni numeriche: convertite in lati', 'Vinyl with numeric positions: converted to sides'));
+      if (sidesGuessed === 'odd') res.warn.push(say('Lati stimati (tracce dispari, il lato A ne ha una in più): verifica sul disco.', 'Sides estimated (odd track count, side A has one more): check on the record.'));
+    }
+    if (lettersRenumbered) res.log.push(say('Posizioni con lettera ("A1a, A1b") rinumerate in sequenza', 'Lettered positions ("A1a, A1b") renumbered in sequence'));
     if (tracks.some((t) => /^([A-Z])(?!\1)[A-Z]\d/.test((t.orig || '').trim()))) res.log.push(say('Solchi paralleli (AA1, AB1…): posizioni lasciate come su Discogs', 'Parallel grooves (AA1, AB1…): positions left as on Discogs'));
     // rows without audio ("(no audio)", "(silence)"): Rym does not list them
     const noAudio = res.tracks.filter((t) => !t.header && /^[(\[]?\s*(no audio|silence|silent track|blank)\s*[)\]]?$/i.test((t.title || '').trim()));
@@ -1694,51 +2452,55 @@
     }
     const mediaRows = res.tracks.filter((t) => t.mediaRow).map((t) => t.title);
     if (mediaRows.length) res.log.push('Media lines (no number): ' + mediaRows.join(', '));
-    const C = capsState();
     // names to protect: the artist and, if made of several words, names found in the credits and in the track artists
     const multi = (n) => /\S\s+\S/.test(n || '');
     const protect = [...new Set([D.artist, D.artistSearch].concat((D.artistsList || []).map((a) => a.name), (D.creditList || []).map((c) => c.name).filter(multi),
       (D.tracks || []).flatMap((t) => t.artists || []).map(clean).filter(multi)).filter(Boolean))].sort((a, b) => b.length - a.length);
-    const rows = res.tracks.filter((t) => !t.mediaRow); // the "CD"/"DVD" lines stay as they are
-    if (C.hold === 'keep') {
-      res.log.push(say('Maiuscole lasciate come sulla fonte', 'Capitalization left as on the source'));
-      res.warn.push(say('Maiuscole come sulla fonte: vale solo per le eccezioni ammesse dalla wiki (grafia ufficiale confermata da fonti concordi). Spiega il motivo nelle fonti; una tracklist tutta maiuscola o tutta minuscola va comunque normalizzata.',
-        'Capitalization as on the source: only for the exceptions allowed by the wiki (official styling confirmed by consistent sources). Explain why in the sources; a tracklist all in capitals or all in lowercase must be normalized anyway.'));
-      return res;
+    // the "CD"/"DVD" rows stay as they are
+    const rows = res.tracks.filter((t) => !t.mediaRow);
+    const Ct = capsState('title'), Cr = capsState('tracks');
+    if (Ct.hold === 'keep' || Cr.hold === 'keep') {
+      res.log.push(say('Maiuscole come sulla fonte: ', 'Capitalization as on the source: ') + [Ct.hold === 'keep' ? say('titolo', 'title') : '', Cr.hold === 'keep' ? 'tracklist' : ''].filter(Boolean).join(', '));
     }
-    if (C.hold) {
-      res.warn.push('Classical: capitalization left as on Discogs (works follow their own rules). Check it, or pick the mode with the checkbox.');
+    if (Ct.hold === 'classical' && Cr.hold === 'classical') {
+      res.warn.push(say('Classica: maiuscole lasciate come sulla fonte (le opere seguono regole proprie). Controllale, oppure scegli una modalità.', 'Classical: capitalization left as on the source (works follow their own rules). Check them, or choose a mode.'));
       return res;
     }
     const before = res.title;
     const flags = new Set();
-    const count = { en: 0, sent: 0, keep: 0, title: 0 };
+    const count = { en: 0, sent: 0, keep: 0, title: 0, de: 0 };
     const langsSeen = new Set();
-    const fix = (str) => {
+    // version words in brackets: always English capitalization, even in a title in another language
+    const VERSION_W = /\b(remix|remixed|mix|dub|edit|re-edit|rework|version|instrumental|original|extended|radio|club|vocal|reprise|live|demo|acoustic|remastered|bonus track|intro|outro|interlude|medley|megamix|vip|acapella|a cappella|single version|album version)\b/i;
+    const versionBr = (out) => out.replace(/([(\[])([^()\[\]]+)([)\]])/g, (all, a, inner, b) => (VERSION_W.test(inner) && !/(?!\p{Script=Latin})\p{L}/u.test(inner) ? a + capEN(inner, protect).text + b : all));
+    const fix = (str, C) => {
+      if (C.hold) return str;
       const md = capsModeFor(str, C);
       let out = str;
       if (md.m === 'en') { const r = capEN(str, protect); r.flags.forEach((f) => flags.add(f)); out = r.text; }
-      else if (md.m === 'title') { out = capEN(str, protect, md.lang).text; langsSeen.add(md.lang); }
-      else if (md.m === 'sent') { out = capSentence(str, protect, md.lang); if (md.lang) langsSeen.add(md.lang); }
+      else if (md.m === 'title') { out = versionBr(capEN(str, protect, md.lang).text); langsSeen.add(md.lang); }
+      else if (md.m === 'sent') { out = versionBr(capSentence(str, protect, md.lang)); if (md.lang) langsSeen.add(md.lang); }
+      else if (md.m === 'de') { out = versionBr(capGerman(str, protect)); langsSeen.add('de'); }
       if (out !== str) count[md.m]++;
       if (md.m === 'keep' && str) count.keep++;
       // Latin translation in brackets inside a non-Latin title: English capitalization
       if (scriptOf(str)) out = out.replace(/\(([^()]*)\)/g, (all, inner) => (!hasNonLatin(inner) && /\p{L}/u.test(inner) ? '(' + capEN(inner, protect).text + ')' : all));
       return out;
     };
-    res.title = fix(res.title);
-    rows.forEach((t) => { t.title = fix(t.title); });
-    if (count.en) res.log.push('Rym English capitalization: ' + count.en + ' titles');
-    if (count.sent) res.log.push('First letter only (non-English titles): ' + count.sent + ' titles');
+    res.title = fix(res.title, Ct);
+    rows.forEach((t) => { t.title = fix(t.title, Cr); });
+    if (count.en) res.log.push(say('Capitalizzazione inglese Rym: ', 'Rym English capitalization: ') + count.en + say(' titoli', ' titles'));
+    if (count.sent) res.log.push(say('Solo iniziale maiuscola (titoli non inglesi): ', 'First letter only (non-English titles): ') + count.sent + say(' titoli', ' titles'));
+    if (count.de) res.log.push(say('Tedesco, sostantivi maiuscoli: ', 'German, capitalized nouns: ') + count.de + say(' titoli (controlla i nomi propri)', ' titles (check proper names)'));
     if (count.title) res.log.push(say('Maiuscole secondo le regole di ', 'Capitalization following the rules for ') + [...langsSeen].filter((l) => TITLE_LANGS[l]).map((l) => LANG_NAME[l]).join(', ') + ': ' + count.title + say(' titoli', ' titles'));
     if (langsSeen.has('fr')) res.warn.push(say('Francese: dopo " : ", " ! ", " ? " con lo spazio si continua in minuscolo (non vale in Canada, tranne i due punti).', 'French: after " : ", " ! ", " ? " with a space the text goes on in lowercase (not in Canada, except the colon).'));
-    if (res.title !== before) res.log.push('Title: «' + before + '» → «' + res.title + '»');
-    if (C.auto && C.lang !== 'unknown') res.log.push('Estimated language: ' + LANG_NAME[C.lang] + ' (change the mode with the checkbox)');
+    if (res.title !== before) res.log.push(say('Titolo: «', 'Title: «') + before + '» → «' + res.title + '»');
+    if (Ct.auto && Ct.lang !== 'unknown') res.log.push(say('Lingua stimata: ', 'Estimated language: ') + LANG_NAME[Ct.lang] + (Ct.sure ? '' : say(' (incerta)', ' (uncertain)')));
     if (flags.size) {
-      res.warn.push('Capitalization: check ' + [...flags].map((f) => '«' + f + '»').join(', ') +
-        ': lowercase if preposition or conjunction, capitalized if adverb (e.g. "Keep On Rockin\'", "You Are So Beautiful").');
+      res.warn.push(say('Maiuscole: controlla ', 'Capitalization: check ') + [...flags].map((f) => '«' + f + '»').join(', ') +
+        say(': minuscolo se preposizione o congiunzione, maiuscolo se avverbio (es. "Keep On Rockin\'", "You Are So Beautiful").', ': lowercase if preposition or conjunction, capitalized if adverb (e.g. "Keep On Rockin\'", "You Are So Beautiful").'));
     }
-    if (count.keep) res.warn.push('German titles or titles in non-Latin scripts left as on Discogs (in German nouns are capitalized): check them by hand.');
+    if (count.keep) res.warn.push(say('Titoli in scritture non latine lasciati come sulla fonte: controllali a mano.', 'Titles in non-Latin scripts left as on the source: check them by hand.'));
     return res;
   }
 
@@ -1816,9 +2578,13 @@
     const names = pageArtists();
     if (!D || D.various || !names.length) return null;
     // for classical music the performers count too (Discogs often lists the composer as the artist)
-    const want = [D.artistSearch, D.artist].concat((D.performers || []).map((p) => p.replace(/\s*\([^)]*\)$/, ''))).map(norm).filter(Boolean);
+    const want = [D.artistSearch, D.artist].concat((D.performers || []).map((p) => p.replace(/\s*\([^)]*\)$/, '')), D.aliases || []).map(norm).filter(Boolean);
     const ok = names.some((n) => want.some((w) => norm(n).includes(w) || w.includes(norm(n))));
-    return ok ? null : names.join(', ');
+    // credited name ("Use:") equal to the release artist: the page is right (alias)
+    const sp = $('#credited_name_specified');
+    const used = sp && sp.checked ? norm([($('#credited_firstname') || {}).value, ($('#credited_lastname') || {}).value].filter(Boolean).join(' ')) : '';
+    const usedOk = used && [D.artistSearch, D.artist].map(norm).some((w) => w && (w === used || used.includes(w)));
+    return ok || usedOk ? null : names.join(', ');
   }
 
   // ---- filling helpers (file under, label, credits, dates, languages, sources) ----
@@ -1849,16 +2615,28 @@
     });
     return out.replace(/\s{2,}/g, ' ').trim();
   }
-  function setCreditedName(str) {
+  function setCreditedName(str, first) {
     const radio = $('#credited_name_specified');
     if (!radio) return;
     if (!radio.checked) radio.click();
     const f = $('#credited_firstname'), l = $('#credited_lastname');
     [f, l].forEach((x) => { if (x) x.disabled = false; });
     // leading article in the First Name field (wiki §3)
-    const m = str.match(/^(the|a|an|le|la|les|il|lo|gli|el|los|las|die|der|das|de|het)\s+(.+)$/i);
-    if (f) { f.value = m ? m[1] : ''; f.dispatchEvent(new Event('change', { bubbles: true })); }
-    setVal(l, m ? m[2] : str);
+    // or the leading first name of a person (wiki "Classical music" §2.6)
+    const m = first && str.startsWith(first + ' ') ? [str, first, str.slice(first.length + 1)] : str.match(/^(the|a|an|le|la|les|il|lo|gli|el|los|las|die|der|das|de|het)\s+(.+)$/i);
+    let fn = m ? m[1] : '', ln = m ? m[2] : str;
+    // surname prefixes by country (wiki "Names with prefixes"): van/von in Germany and the Netherlands, de/d' in France, de/del in Spain, da/do in Portugal -> in First name, lowercase
+    const P = first && m ? ln.match(/^(van der|van den|van de|von der|aus der|auf der|de la|de las|de los|van|von|zu|de|del|da|do|das|dos)\s+(.+)$/i) || ln.match(/^(d')(.+)$/i) : null;
+    if (P) {
+      const c = D.country || '', pre = P[1].toLowerCase();
+      const toFirst = (/Netherlands/.test(c) && /^(van|de|van der|van den|van de)$/.test(pre)) || (/Germany|Austria|Switzerland/.test(c) && /^(van|von|von der|zu|aus der|auf der)$/.test(pre)) ||
+        (/France|Monaco/.test(c) && /^(de|d')$/.test(pre)) || (/Spain|Mexico|Argentina|Colombia|Chile|Peru|Venezuela|Uruguay|Cuba/.test(c) && /^(de|del|de la|de las|de los)$/.test(pre)) ||
+        (/Portugal|Brazil|Angola|Mozambique/.test(c) && /^(da|de|do|das|dos)$/.test(pre)) || (/Romania/.test(c) && pre === 'de');
+      if (toFirst) { fn = fn + ' ' + pre; ln = P[2]; }
+      else if (/^(UK|US|Ireland|Australia|Canada|New Zealand|Italy)\b/.test(c)) ln = P[1].charAt(0).toUpperCase() + P[1].slice(1) + (pre === "d'" ? '' : ' ') + P[2];
+    }
+    if (f) { f.value = fn; f.dispatchEvent(new Event('change', { bubbles: true })); }
+    setVal(l, ln);
     touched.fields.add('credited');
   }
 
@@ -1932,7 +2710,8 @@
     MCSC: 'China', COMPASS: 'Singapore', MACP: 'Malaysia', FILSCAP: 'Philippines', IPRS: 'India', ASCAP: 'United States', BMI: 'United States',
     SESAC: 'United States', HFA: 'United States', AMRA: 'United States', SOCAN: 'Canada', CAPAC: 'Canada', PROCAN: 'Canada', SODRAC: 'Canada',
     CMRRA: 'Canada', APRA: 'Australia', AMCOS: 'Australia', SADAIC: 'Argentina', CAPIF: 'Argentina', ECAD: 'Brazil', ABRAMUS: 'Brazil', UBC: 'Brazil',
-    SACM: 'Mexico', SCD: 'Chile', SAYCO: 'Colombia', APDAYC: 'Peru', AGADU: 'Uruguay', SACVEN: 'Venezuela', SAMRO: 'South Africa', SAYCE: 'Ecuador' };
+    SACM: 'Mexico', SCD: 'Chile', SAYCO: 'Colombia', APDAYC: 'Peru', AGADU: 'Uruguay', SACVEN: 'Venezuela', SAMRO: 'South Africa', SAYCE: 'Ecuador',
+    AACIMH: 'Honduras', AADI: 'Argentina', ACAM: 'Costa Rica', ACDAM: 'Cuba', ALBAUTOR: 'Albania', AMAR: 'Brazil', ASSIM: 'Brazil', JACAP: 'Jamaica', MACA: 'Macau', MCSK: 'Kenya' };
   function countryFromSocieties(list) {
     const found = new Map();
     list.forEach((v) => String(v).toUpperCase().split(/[\s\/,;+&-]+/).forEach((tok) => { if (PRO[tok] && !found.has(PRO[tok])) found.set(PRO[tok], tok); }));
@@ -2026,7 +2805,7 @@
   // Credits: official Rym roles ("Music roles" page)
   const RYM_ROLES = new Map('10-string double violin|12-string acoustic guitar|12-string baritone guitar|12-string bass|12-string electric guitar|12-string guitar|12-string lead guitar|2-row accordion|2D animator|2D design|3-row diatonic button accordion|3D animator|3D modeling|6-string bass guitar|7-string acoustic guitar|8-string guitar|A clarinet|A&R administrator|A&R chief|A&R coordinator|A&R desk|A&R director|A&R executive|A&R manager|A&R producer|A&R supervisor|accompanist|accordina|accordion|accountant|Acetone organ|acme siren|acoustic baritone guitar|acoustic bass|acoustic guitar|acoustic piano|acoustic piccolo bass|acoustic rhythm guitar|action camera|actor|ad-libs|adaptation|additional animator|additional arranger|additional art|additional backing vocals|additional bass|additional composer|additional design|additional director|additional drums|additional effects|additional engineer|additional executive producer|additional guitar|additional instrumentation|additional keyboards|additional lyricist|additional manipulation|additional mastering engineer|additional mixing engineer|additional orchestra|additional orchestration|additional overdubbing|additional percussion|additional photography|additional piano|additional post-production|additional producer|additional programming|additional rhythm arrangements|additional sound design|additional vocal arrangements|additional vocals|adjá|administrator|adufe|adungo|adungu|Aeolian harp|agogô|agoual|agwal|ajaeng|akonting|alarm clock|alboka|album title|alfaia|algoza|alperidoo|alphorn|alto balalaika|alto clarinet|alto cornamuse|alto crumhorn|alto flute|alto fluteophone|alto guitar|alto horn|alto kamancheh|alto psaltery|alto rebec|alto saxophone|alto shawm|alto trombone|alto viol|alto violin|alto vocals|altyn shoor|Aluphone|amadinda|ambisonics|amplification|amplified objects|amplified piano|amplified sitar|amyrga|analog delay|analog sequencer|analog synthesizer|analogue electronics|anandi|angklung|Anglo concertina|angular harp|animal noises|animal trainer|animated art|animation director|animation producer|animator|ankle bells|announcer|antiphony|apito|Appalachian dulcimer|arbajo|archaic fretless zithers|arched harp|archive engineer|archivist|archlute|ardin|Argentinean guitarrón|arghul|ARP|ARP Explorer I|ARP Odyssey|ARP Solina string synthesizer|arpa jarocha|arpeggione|arpegina|arrangement supervisor|arranger|art|art concept|art department|art department assistant|art direction|art manipulation|art producer|art supervisor|artist manager|artist promotion|artistic assistant|artistic director|artists and repertoire|artwork restoration|asatayak|ashiko|askavlos|assembly editor|assistant art director|assistant choreographer|assistant conductor|assistant coordinator|assistant designer|assistant director|assistant engineer|assistant executive producer|assistant grip|assistant leader|assistant manager|assistant mastering engineer|assistant producer|assistant production manager|assistant production supervisor|assistant scenographer|assistant set designer|assistant set manager|assistant vocal engineer|assistant vocal recording engineer|associate director|associate executive producer|associate music director|associate producer|atabal|atabaque|atarigane|atenteben|atmosphere|attributed|atumpan|audio restoration|aulos|author|authoring|auto-wah|autoharp|axabeba|ayoyote|aşik sazı|A♭ clarinet|A♮ clarinet|B-Bender|babatoni|back cover art|back cover photography|background actors\' coordinator|background artist|backing band|backing vocal arrangements|backing vocals|backline technician|backstage photography|backup dancer|bagpipes|Bahian gaita|Bahian guitar|bajo quinto|bajo sexto|bak|Bakhshi staccato ornamentation|balafon|balalaika|ballet dancer|balloon|Baltic psalteries|bamboo flute|bamboo saxophone|bamhum|ban-sitar|band photography|bandola|bandolim|bandolin|bandoneón|bandora|bandura|bandurria|bangzi|banjeaurine|banjo|banjola|banjolele|banjolin|bansuri|bantar|barabanka|barbat|barbiton|baritone Anglo concertina|baritone guitar|baritone horn|baritone saxophone|baritone ukulele|baritone violin|baritone vocals|barking dog|Baroque bassoon|Baroque cello|Baroque flute|Baroque guitar|Baroque harp|Baroque oboe|Baroque trumpet|Baroque viola|Baroque violin|barrel organ|barrel piano|baryton|baryton-Martin|bas|bas-prim|basolia|bass|bass Anglo concertina|bass balalaika|bass banjo|bass clarinet|bass cornamuse|bass crumhorn|bass drum|bass dulcian|bass flugelhorn|bass flugelhorn in B♭|bass flute|bass guitar|bass guitar synthesizer|bass harmonica|bass lute|bass marimba|bass moraharpa|bass nyckelharpa|bass oboe|bass pan|bass pedals|bass piano accordion|bass programming|bass psaltery|bass pulse|bass rebec|bass recorder|bass recording engineer|bass sackbut|bass santur|bass saxophone|bass synth keyboard|bass technician|bass trombone|bass trumpet|bass tuba|bass tube|bass tār|bass ukulele|bass veena|bass viol|bass violin|bass vocals|bass-baritone vocals|basset clarinet|basset horn|bassetto|basskannel|basso profondo|bassoon|basy kaliskie|bat kine|Batajón|Batajón Itotele|Batajón Iya|Batajón Okónkolo|baton|battala|batá|bawa|bawu|bayan|Bayanola|bazooka|bağlama family|baş sazı|beat box|beats|beauty stylist|bedug|begena|Belarusian duda|bell tree|bells|bena|bendir|benyol|berimbau|best boy|bhapang|bianqing|bianzhong|bijol|bilo|binioù kozh|birbynė|birch trumpet|bird call|bisernica|bishguur|biwa|bladder fiddle|blarge|blowing horn|blul|bo|boatswain\'s call|bodega|bodhrán|body percussion|boha|bolon|bombard|bombardon|bombo|bonang|bonang barung|bonang panerus|bones|bongos|book|booklet|booklet cover|booklet design|booklet photography|booklet structure|Boomwhacker|border pipes|bordonúa|botalo|botija|bottle|bottleneck guitar|boté|bougarabou|boula|bouzouki|bouzouki-guitar|bow harp|bow-shaped Jew\'s harp|bowed banjo|bowed bass guitar|bowed electric guitar|bowed glockenspiel|bowed guitar|bowed gusli|bowed lute|bowed psaltery|bowls|boîte à bourdons|braithophone|brake drum|brass|brasswinds|Brazilian fife|Brazilian guitar|breakbeats|breakdancer|breaking glass|bridge vocals|bronté|broom|brushes|BTS DP|bucium|Buddha machine|bugarabu|bugarija|bugle|buhay|buisine|bukhalo|bukkehorn|bulbul tarang|bulgari|Bulgarian tambura|bull horn|bullroarer|bungkaka|button accordion|buzuq|buzzer|byou uchi-daiko|byzaanchy|Byzantine lyra|béndré|B♭ clarinet|B♭ soprano sarrusophone|B♭ soprano saxophone|B♭ trumpet|B♭ whistle|C clarinet|C soprano saxophone|C trumpet|C whistle|c-melody saxophone|cabasa|cabrette|cacho|cadenza|caixa|caixa de folia|caja andina|caja vallenata|cajita china|Cajun accordion|cajón|calabash|Calabrian lira|caller|calligraphy|calliope|camcorder operator|cameo|camera assistant|camera control unit|camera operator|campana|campanula|can-jo|candombe drums|cantaor|cantaro|cantor|capped reeds|card design|caricature|carillon|Carlsfelder concertina|carnyx|carts|castanets|casting|casting associate|casting director|CAT synthesizer|cathedral organ|catá|cavaquinho|caxixi|caña rociera|CD player|CD prep|cedar flute|celempung|celesta|cello|cello banjo|cello da spalla|cello pan|Cellotar|Celtic harp|cetara|ceterone|cevgen|CG artist|CG director|ch\'ili|chabbaba|chadagan|chain saw|chajchas|chakhe|chalumeau|chamber organ|Chamberlin|changi|chant|chanza|chapey|Chapman Stick|character designer|charango|charanguita|charangón|chardha|charrasca|chaturangu|chelys|Chemnitzer concertina|chief director|chief planner|chief producer|chijin|child vocals|children\'s choir|Chilean guitarrón|chime tree|chincha quena|chinchín|chindon|ching|chitarra battente|chitarrone|chitravina|choghur|choir|choir organ|choirmaster|chopping and screwing|choquela|choral arrangements|choral lyricist|chord harmonica|chord organ|Chorda|chordophones|choreographer|chorus|chorus effect|chromatic accordion|chromelodeon|chuniri|churuca|chuzao shamisen|chácaras|chácharo|cigar box guitar|cimbalom|cimbasso|cimpoi|cinco|cinematographer|circuit bending|cirrampla|cithara|citole|cittern|clarin|clarinet|clarisax|clarophone|classical kemenche|claves|clavicembelo|clavichord|clavicymbalum|clavicytherium|Clavinet|claviola|Clavioline|claviorgan|claymation|clayrimba|clean vocals|CLEX|click sticks|clock|clockworks|clog dancer|clog violin|cloud-chamber bowls|clàrsach|co-arranger|co-director|co-executive producer|co-producer|co-sound producer|co-writer|cobza|cocktail drum|colascione|collage artist|Colombian gaita|Colombian tambora|color coordinator|color designer|color grading|colorist|comb|combolin|comedian|comic book|comics|Companion organ|compilation engineer|compilation producer|compiler|composer|composer coordinator|composer\'s assistant|compositing|composition|compressor|computer|computer animation|computer manipulation|computer programming|concept|concert promotion|concert timpani|concert uilleann pipes|concert ukulele|concertina|concertmaster|conch shell trumpet|condanctor|conductor|congas|Conn-o-sax|console steel guitar|consultant|contact microphone|content structure|content structure assistant|Continuum Fingerboard|contra-alto clarinet|contrabass balalaika|contrabass clarinet|contrabass flute|contrabass guitar|contrabass recorder|contrabass saxophone|contrabass trombone|contrabassoon|contraforte|contraguitar|contralto saxophone|contralto vocals|contraviola|cookbook|cooperator|coordinator|copyist|copywriter|cornamuse|cornemuse du Centre|cornet|cornett|corrugaphone|Cosmic Beam|costume assistant|costume designer|couesnophone|countertenor vocals|cover art|cover concept|cover coordinator|cover design|cover illustration|cover model|cover photography|cover styling|cow horn trumpet|cowbell|cracked everyday electronics|Cracklebox|crane operator|crash box|Craviola|creative coordinator|creative director|creative producer|creator|Cretan laouto|Cretan lyra|cristal Baschet|cromorne|crotales|crowdy-crawn|crumhorn|cruzaphone|crwth|cuatro|Cuban tres|cuica|cultrun|cumaco|cununo|cura|curator|cutting engineer|cymbals|cymbow|cümbüş|cümbüş tanbur|D whistle|da\'uli da\'uli|daejaeng|dalang|daluo|damaha|damaru|dambus|dancer|dang bipa|danso|darabukka|daruan|daudytės|davul|daxophone|dayereh|death whistle|deejay (vocals)|deff|delay|dengakubue|denshig|design|design coordinator|design director|design producer|desk|desktop publishing|devangui|devices|devil\'s fiddle|dhantal|dhog-dhog|dhol|dholak|dholki|dhyangro|dialogue editor|diatonic accordion|dictaphone|dictation machine|diddley bow|didgeridoo|Didjeribone|digital audio workstation|digital delay|digital editing|digital engineer|digital imaging technician|digital mastering|digital painting|digital reverb|digital sequencer|digital transfer|dilruba|ding|dingulator|diplica|diplipito|direct metal mastering|director|director of choreography|disc design|disc production assistant|disc production director|distortion|divan sazı|division viol|diyinruan|dizi|DJ|DJ controller|DJ mixing|djembe|djoze|Dobro|Dobro bass|dobulbash|dojo|dolceola|dolly grip|dombura|Dominican tambora|domra|donno|donso n\'goni|door spring|doshpuluur|dotar|dotar gourd lute|dotara|double|double bass|double clarinet|double flute|double reed|double second|double tenor|double-action harp|double-headed drums|doundoumba|dragon\'s teeth|dramaturge|dramyen|drawings|dressmaker|drill|driver|drone fiddle|Drone Machine|drone operator|drum arrangements|drum director|drum editing|drum kit|drum loops|drum machine|drum pad|drum programming|drum recording engineer|drum technician|drums|dual-bell trumpet|dub|ducheke|duck call|duclar|dude|duduk|dudy|duet concertina|duggi tarang|dulce melos|Dulcetina|dulcian|dulcimer|dulcitone|dulzaina|dungchen|dungdkar|dunun|dutar|duxianqin|DVD player|dvojnice|dwojnica|dùndún|düngür|EBow|echo cornet|editing|editing assistant|editorial coordinator|effects|Eigenharp|ektara|ekue|ekwe|electric autoharp|electric bandolim|electric banjo|electric baritone guitar|electric bass|electric bass dombra|electric bouzouki|electric cello|electric cellotar|electric dombra|electric grand piano|electric guitar|electric harp|electric harpsichord|electric kalimba|electric keyboard|electric mandola|electric mandolin|electric oud|electric piano|electric piccolo bass|electric rake|electric rhythm guitar|electric saw|electric saz|electric solid-body banjo|electric soprano guitar|electric spoons|electric tambourine|electric tenor guitar|electric tres|electric trombone|electric trumpet|electric ukulele|electric upright bass|electric vibraphone|electric viola|electric viola da gimbri|Electric Viola Grande|electric violin|electric zither|electric-acoustic guitar|electrical assistant|electrician|electro-theremin|electrocardiophone|electrochord|electroencephalophone|electroneddas|electronic bagpipes|electronic drums|electronic effects|electronic organ|electronic percussion|electronic piano|electronic tanpura|electronics|electronics / electromechanical devices / machines|electrophone|elong|embaire xylophone|Emulator|end-blown flutes|endangered guitar|energized surfaces|engineer|engineer coordinator|engineering|engineering supervisor|English concertina|English guitar|English horn|enhanced content creator|ensemble|equipment technician|ergek shoor|erhu|erke|erxian|esraj|esseharpa|esterilla|etching artwork|ethnographic consultant|euphonium|ever buree|EVI|ewartophone|Ewe drums|EWI|executive coordinator|executive director|executive producer|executive sound producer|executive supervisor|extra|E♭ clarinet|E♭ contrabass sarrusophone|E♭ whistle|F bass flute|F whistle|Fairlight|falsetto|fan|Fanfarlophone|fanfrnoch|Farfisa|fashion director|featured|feedback|felt piano|ferrinho|fiddlesticks|fidel płocka|field organ|field recordings|fife|fight choreographer|filimbi|filmmaker|filouphone|final engineering|finger cymbals|finger snaps|finish|fire extinguisher|first assistant camera|first assistant director|first lighting assistant|first tenor vocals|first violin|fiscorn|five string banjo|fiðla|flabiol|flabuta|flageolet|flamenco dancer|flamenco guitar|flanger|flapamba|flat-set uilleann pipes|flauta de millo|Flemish bagpipes|flexatone|flogera|floor slide|floor tom|fluba|flugelhorn|fluid piano|fluier|flumpet|flute|flute arrangements|fluteophone|flutonette|flûte d\'amour|foghorn|FOH engineer|foot stomper|foot tapping|fortepiano|fou|founder|four string banjo|four-course bouzouki|fractal art|frame drum|Franglo concertina|free reeds|French horn|fretless banjo|fretless bass|fretless guitar|fretless zither|fretted dulcimer|friction drum|friction idiophones|front cover art|front cover photography|fruja|frula|fuhun|fujara|funde|furruco|futozao shamisen|futujara|fuyara|fuzz|fyell|G clarinet|G whistle|gachi|gadulka|gaffer|gaida|gaita|gaita asturiana|gaita charra|gaita de caboclinho|gaita de foles|gaita hembra|gaita macho|gaita ponto|gaita transmontana|gajdica|gaklab|gallal|gambang kayu|Game Boy|game call|gamelan|gandang|gandharvi|gang vocals|gangkoqui|gangsa|gangsa gong|gangsa kantilan|gangsa metallophone|gangsa pemadé|ganza|gaohu|gaoyinruan|garden rake|gardon|Garifuna drum|garklein recorder|garmon|gasba|Gbedu|gemshorn|gendér|gendér barung|gendér panerus|general assistant|general producer|general sound producer|general supervisor|gentorak|geomungo|German concertina|ghatam|ghaychak|ghungroo|gidjak|gitouki|gittern|glass harmonica|glass harp|glass marimba|Glissando Headjoint flute|Glissentar|glockenspiel|glossolalia|goat horn trumpet|goblet drum|goje|gome|gong|gorosu|gottan|goura|gourd banjo|graffiti|grage|graile|gralla|gralla baixa|gralla curta|gralla dolça|gralla llarga|gralla subbaixa|gramophone|grand piano|grande bourbonnaise|grandes cornemuses du Centre|granular synthesizer|graphic design|graphics|graphics coordinator|graphics layout|graw|great bass crumhorn|great Highland bagpipes|Greek baglama|grip|groovebox|group|growls|guacharaca|guache|guan|guasá|guayo|gudastviri|gudok|guest|guest speaker|guide-chant|guitalele|guitalin|guitar|guitar loops|guitar phím lõm|guitar recording engineer|guitar synthesizer|guitar technician|guitar-o-lin|Guitaret|guitarra conchera|guitarra de golpe|guitarra-da-terra micaelense|guitarra-da-terra terceirense|guitarrino|guitarro|guitjo|guitolão|guitorgan|gumbass|gungon|guqin|gusle|gusli|gut-string guitar|guzheng|gwoka|gyaling|gyil|güira|güiro|h\'arpeggione|Hadjira|haegeum|hair stylist|hair stylist assistant|halldorophone|hambone|hammer|hammered dulcimer|Hammond organ|hand gong|hand percussion|handbells|handclaps|Hang|hapi drum|hard drives|Hardanger d\'amore|hardingfele|harmonic cannon|harmonica|harmonies|harmonium|harmony composer|harp|harp guitar|harp-lute|harpejji|harpsichord|Harryphone|harsh vocals|haute-contre|Hawaiian guitar|hayashi|head of creative|headless tambourine|headphones|hearpe|heckel-clarina|Heckelphone|hegelung|helicon|heligonka|hi-hat|hichiriki|highland hornpipe|hindehoo|hirtenschalmei|homemade instruments|hooked harp|hooligan drums|horagai|horn|horn arrangements|hosho|hosozao shamisen|host|hot fountain pen|huapanguera|hubcap|hulusi|hummel|humming|Hungarian citera|hunting horn|huobosi|huqin|hurdy gurdy|huēhuētl|hyang bipa|hype man|hyperbass flute|hyōshigi|härjedalspipa|hümmelchen|idioglottic reed|idiophones|ieta|igil|ikh khuur|illustration|ilu|image consultant|image editor|image selection|images|immersive mixing engineer|imzad|inbetween animation checker|inbetween animator|incantation|Indian harmonium|Indian slide guitar|Indian tambura|Innato flute|innenklavier|inner design|inner photography|inner sleeve photography|insert design|instructor|instrument maintenance|instrument technician|instrument tuning|instrumentation|instruments|instruments recording engineer|international marketing|interviewee|interviewer|intimacy coordinator|intonarumori|iPad|iPod|ipu|Irish bouzouki|Irish flute|Irish tenor banjo|isitontolo|itótele|iyá|jal tarang|jaleo|jam block|jaminator|jang sae-nap|janggu|Jankó keyboard|jarana huasteca|jarana jarocha|jarana primera|jarana segunda|jauram|jawbone|jawsaphone|jazzophone|jejy voatavo|jeli n\'goni|jengglong|jentreng|Jew\'s harp|jewelry|jez kernei|jib operator|jing|jouhikko|jouras|jublag|jug|jungga|junggeum|junghaegeum|junjung|jushichi-gen|jwago|jīnghú|k\'lông pút|kabosy|kabuli rebab|kacapi|kacapi indung|kacapi rincik|kachapitar|kaganu|kagurabue|kalyuka|kamalen n\'goni|kaman|kamayacha|kamānche|kane|kangling|kanjira|kanklės|kannel|kanonaki|kanrang|kantele|kanun|Kaoss Pad|karinding|karinian|kartal|kaser|kaval|kawala|kayagum|kayamb|kazoo|Kazooka|kaşık|kebero|kecrek|kecèr|kemenche|kempli|kempul|kendang lanang|kengirge|kenken|kenkeni|kenong|kepyak|kethuk|key animator|key grip|key hair stylist|key makeup|keyboard arrangements|keyboard programming|keyboard sitar|keyboard technician|keyboards|keymonica harmonica|keyolin|keytar|kha dae-kha bart|khaen|khaen baet|khaen jet|khanwe|khapchyk|khloy|khlui|khomok|khoomei|khulsan khuur|khurtal|khuuchir|kick drum|kick snare|kidumbak|kissar|kit violin|kitchen utensils|kkwaenggwari|klavifon|klaxon|klentong|knee slapping|knife|kobyz|kobza|kokiriko|kokle|kokyū|kologo|koncovka|kong vong toch|konghou|konnakol|kontra|kontrasípos duda|kopuz|kora|Korean jabara|kortholt|kotamo|koto|krachappi|krar|kroboto|kromaatiline kannel|kroncong|kse diev|kubing|kubyz|kuduhorn|kudüm|kugikly|kuhmoongo|kukkopilli|kulcapi|kulintang|kunstharmonium|kutiriba|kutirindingo|kutiro|kutiyapi|kyam|kyl kyiak|kyêma|kèn|kōauau|kūchō|kơ ní|Labanoro dūda|label assistant director|label design|label director|lagerphone|lali|lambe|lamellate Jew\'s harp|lamellophones|langden|langeleik|langspil|language consultant|language instructor|laouto|lap pedal steel guitar|lap steel|laser harp|laterna|Latin percussion|launeddas|lavta|layout|layout restoration|laúd|lead arranger|lead CG artist|lead composer|lead compositor|lead dancer|lead guitar|lead tenor vocals|lead vocals|leader|leading actor|legal|leona|lepenelauta|Leslie speaker|librettist|light board operator|lighting|lighting assistant|lighting designer|lighting director|lighting operator|limbi|line producer|liner notes|liner notes design|liner notes editor|liner notes translator|lingm|Linn LM-1|LinnStrument|liquindi|lira|lira da braccio|lirone|lithophone|litungu|liuqin|live coding|live electronics|live producer|live recording crew|live recording engineer|live sampling|live sound engineer|live vocal processing engineer|llautë|location coordinator|location manager|location scout|log drum|logger|logistics|logo|lokanga bara|lokolé|long string drone|long string instrument|loops|loudspeaker|lounga|low D whistle|low whistle|Lowrey organ|ludaya|luikku|lujon|Lumatone keyboard|lumzdelis|lur|lurk|lusheng|lute|lute guitar|lute-harpsichord|lyra|lyra viol|lyre|lyric baritone vocals|lyric tenor vocals|lyrical concept|lyricist|Lyricon|lyrics consultant|lyrics translator|låtfiol|låtmandola|Léode|lõõtspill|m\'bung m\'bung|M4|madal|magnetic cartridge|magnetic resonator piano|Mahai Metak|makeup|makeup assistant|makhoyane|makwa|male soprano vocals|MalletKAT|mallets|malta|management desk|manager|mando guitar|mandobass|mandocello|mandol|mandola|mandolin|mandolin-banjo|mandolino|mandoliny|mandolone|mandolute|mandora|mandozither|manga|mangala vadya|manicurist|manipulation|manipulation assistant|manzello|mapping|maracas|maracones|marching drums|marching trombone|marimba|marimba de chonta|marimbaphone|marimbau|marketing|marketing assistant|marketing cooperation|marketing director|marketing planner|Martinshorn|Marxophone|marímbula|masankop|masenko|mastering consultant|mastering coordinator|mastering engineer|matchbox|matófono|mazanki|mazhar|mbira|MC|media manager|medieval harp|megaphone|mejoranera|mellophone|mellophonium|Mellotron|melodeon|melodeon accordion|melodeon organ|melodica|membranophones|merchandiser|metal pipes|metallophones|metronome|Mexican guitarrón|Mexican tambora|Mexican vihuela|meydan sazı|mezzo-soprano saxophone|mezzo-soprano vocals|mi-solo guitar|Micromoog|microphone|microtonal bass guitar|microtonal electric guitar|microtonal guitar|MIDI|MIDI controller|MIDI programming|milanolo|military band|military snare drum|mime|mini 12-string guitar|MiniDisc|Minimoog|miraj|mirwās|misattribution|mixing assistant|mixing consultant|mixing coordinator|mixing engineer|mizwid|mišnice|mobile phone|model|modular synthesizer|mohan veena|mohoceño|monitor engineer|monkey stick|monochord|Monome grid|moo box|Moodswinger|Moog|Moog Liberation|Moog Taurus bass|mora-oud|moraharpa|morchunga|morin khuur|moringa|morsing|motion graphics design|motorized devices|mouth music|mouth speaker|mouthpiece|movement director|MPC|mridangam|mukkur|multi audio engineer|multi-instrumentalist|murgu|musette|musette Béchonnet|music box|music contractor|music designer|music director|music librarian|music production director|music programming|music supervisor|musical assistant|musical bow|musician coordinator|mute cornett|muyuz kernei|mwanzi|mänkeri|mùyú|müsa|n\'goni|n\'vike|nafīr|nagada|nagado-daiko|nagaswaram|Nagoya Harp|nai|nail violin|nakers|naqareh|naqos|narration|narsinga|nasal chorus|Native American flute|nattuvangam talam|natural horn|natural trumpet|nağara|ndehou|ndzedze|Nepali flute|Nepali sarangi|ney|ngoma|ngombi|nickelodeon|niju-gen|no-input mixing board|noh utai|nohkan|noise|noise generator|Northumbrian pipes|Norwegian lyre|nose flute|nose organ|Novachord|Novation Launchpad|novel|NS/Stick|Nyabinghi drums|nyangile|nyatiti|nyckelharpa|o\'ele\'n strings|objects|oboe|oboe d\'amore|oboe da caccia|ocarina|Ocean drum|ochlebky|octave mandola|octave splitter|octave violin|octobass|octophone|offline editing|okónkolo|olifant|omele méta|Omnichord|ondes Martenot|Ondioline|online editing|ophicleide|optical synthesizers|Optigan|Optron|orchestra|orchestral accompaniment|orchestral arrangements|orchestral percussion|Orchestron|organ|organetto|organistrum|orpharion|orutu|oscillator|Otamatone|oud|oungum|overdrive|overtone flute|overtone singing|ožragis|p\'iri|package coordinator|package design|packaging|packaging art direction|Paetzold recorder|page turner|pahu|paimensoittu|painting|pakhawaj|palheta|palitos|palmas|Pamiri rubab|Pamiri tanbur|Pamiri tar|pan flute|pandeiro|pandero cuadrado de Peñaparda|pandero jarocho|pandur|pandura|panduri|panhuēhuētl|pansori aniri|pansori gosu|Papoose|Paraguayan harp|parai|pardessus de viole|parkapzuk|parkour|patsu|Pedabro|pedal accordion|pedal harp|pedal keyboard|pedal piano|pedal steel guitar|pedals|pena|pencilina|penny whistle|pentarpa|penyacah|pepa|percuphone|percussion|percussion arrangements|percussion programming|percussive dance|percussive objects|percuteria|performance supervisor|performer|Persian bagpipe|phaser|Philicorda|phin|phin nam tao|phin pia|phonograph|photographic assistant|photography|phototypesetting|physiophonograph|phách|pi joom|Pianet|piano|piano accordion|piano arrangements|piano harp|piano recording engineer|piano technician|piano wire|pianola|pianolin|pibgorn|piccolo|piccolo Anglo concertina|piccolo balalaika|piccolo bass|piccolo guitar|piccolo oboe|piccolo trombone|piccolo trumpet|pickup|pifana|piffero|pifre|Pikasso guitar|pinkillo|pipa|pipe|pipe organ|piri|pistoñ|pitch pipe|pitched percussion|pito herreño|piva|pixel art|pixiphone|pkhachich|pku|placeholder art|planner|planning adviser|plastic bucket|plate reverb|plating engineer|playback engineer|Playtron|plectrum guitar|pleneras|plosive aerophones|pocket cornet|pocket trumpet|podorythmie|poet|poica|Polymoog|polyphonia harmonica|polyphonic synthesizer|pommer|pone pon|Pontic kemenche|pook|popping|portative organ|portrait photography|Portuguese cavaquinho|Portuguese guitar|positive organ|post horn|post-production|post-production assistant|post-production manager|post-production supervisor|poster design|pots|pots and pans|practice chanter|practice goose|prato-e-faca|pre-production|preaca|precision driver|premastering engineer|premixing engineer|prepared bass guitar|prepared double bass|prepared drums|prepared guitar|prepared harpsichord|prepared piano|prepared Sardinian guitar|preret|presenter|press release|prim|prima balalaika|principal bass|principal cello|principal dancer|principal flute|principal viola|prkno|Pro Tools|processing|producer|product coordinator|product design|product manager|product producer|production|production assistant|production consultant|production control|production cooperator|production coordinator|production desk|production director|production engineer|production manager|production supervisor|programming|programming assistant|project assistant|project coordination|project producer|project supervisor|Projectron|promotion chief|promotion desk|promotion supervisor|proofreader|Prophet 5|Prophet-10|props|prosvirelka|psalmodicon|psalterium|psaltery|pseudo-organ|pshina|public address technician|public relations|publicist|publisher|Puerto Rican cuatro|Puerto Rican tres|puik-puik|puili|pungi|puppet designer|puppeteer|purring|putipù|PVC pipes|pyngyr|pyrotechnician|pythagorean harp|pyzhatka|pūtōrino|qamlapsh|qanbūs|qiben|qilaut|qing|qinqin|qraqeb|quadraphant|quartara|quena|quenacho|Quindola|quinto|quinton|quitiplás|rabeca|rabel|rackett|radio|radio transmitter|raft zither|rahvakannel|rainstick|rajão|ranat ek|rap|rap arrangements|ratchet|rattle|rauschpfeife|ravanhatta|ravanne|rawap|re-editing|re-recording engineer|re-recording mixer|Reactable|reamping|rearranger|rebab|rebana|rebec|rebolo|recitation|record executive|recorder|recording assistant|recording coordinator|recording director|recording engineer|recording equipment|recording manager|recording producer|recording supervisor|recordings|redactor|reed organ|reed trumpet|regal|reissue supervisor|release operator|remastering engineer|remixer|remixing engineer|renaissance guitar|Renaissance violin|rendering|repeater|repinique|repique de mão|requinto guitar|requinto jarocho|research|resident|resistor|resonator guitar|resonator mandolin|reverb|reverse flugelhorn|reyong|rhaita|rhamani|Rhodes|rhymes|rhythm guitar|rhythm programming|rhythm section|rhythm section arranger|rhythm sticks|ribbon reed|Richter-tuned harmonica|ride cymbal|rim-blown flutes|rindik|ring modulator|riq|roadie|rocar|Roman bells|rommelpot|rondador|roneat ek|ronroco|rosem|roto-tom|rozhok|ruan|rubarp|rubber bands|rudra veena|Rumorarmonio|runner|Russian guitar|rute|ryuteki|sabar|sabar n\'der|sabaro|sac de gemecs|sackbut|saenghwang|saggeypo|salamuri|salo|salpinx|saluang|Samchillian|samica|samjuk|sample clearance|sample preparation|sampler|sampling|sanba|sandpaper blocks|sangban|sanshin|santoor|santur|sanxian|sapeh|Sardinian guitar|sarinda|sarod|saron|saron barung|saron demung|saron panerus|saron wayang|sarrusophone|sarune|sasando|sassa|satar|sato|satârâ|saung|saw|saw sam sai|saw u|saxello|saxhorn|saxobone|saxonette|saxophone|saz|sazabo|scanning|scat|scenographer|scetavajasse|scheitholt|Schrammelharmonika|schreierpfeifen|Schwyzerörgeli|schäferpfeife|score preparation|score reconstruction|Scottish smallpipes|Scottish snare drum|Scottish tenor drum|scraper|scratching|screenprint|script supervisor|scriptwriter|scythe|se|Seaboard|second assistant camera|second assistant director|second cello|second lighting assistant|second tenor vocals|second unit director|second viola|second violin|seeds|sekunda balalaika|selector|self-oscillating drum|semi-acoustic guitar|Sensory Percussion|seperewa|sequencer|sequencing|serp|serpent|serpent Forveille|serraggia|serunai|session manager|session musician|session vocalist|set builder|set designer|set dresser|set manager|setar|setor|seul|Shah Kaman|shahi baaja|shakers|shakubyōshi|shakuhachi|shamisen|shantu|shanz|shargia|shawm|shehnai|shekeres|shells|sheng|sherter|shime-daiko|shinobue|shishi-odoshi|shofar|shoor|shrieks|shuangqing|shulberry|shurangiz|shvi|shyngyrash|shō|sico|sign-language interpreter|sikulu|simbing|simsimiyya|singing bowls|single reed|single-headed dhol|single-stringed zithers|sintir|Sioux drum|sipsi|siren|sirenette|sistrum|sitar|sitar guitar|sitarla|sitello|siter|six string banjo|sixian|skratji|skudučiai|sleeve|sleeve coordinator|sleeve design|sleeve notes|sleeve photography|sleigh bells|slenthem|slide bass|slide clarinet|slide guitar|slide piano log|slide saxophone|slide whistle|slit drum|smart guitar|snare drum|social media manager|soft drink can|sogeum|sogo|sohaegeum|Solina|soloist|Soma pipe|somporing|song lang|song titles|songwriter|sopilka|sopranino clarinet|sopranino rauschpfeife|sopranino recorder|sopranino saxophone|sopranino schreierpfeifen|sopranissimo saxophone|soprano clarinet|soprano cornamuse|soprano cornet|soprano crumhorn|soprano dulcian|soprano flute|soprano guitar|soprano psaltery|soprano rebec|soprano recorder|soprano saxophone|soprano schreierpfeifen|soprano trombone|soprano violin|soprano vocals|sound|sound A&R|sound composer|sound consultant|sound coordinator|sound creator|sound designer|sound director|sound editor|sound effects|sound effects programming|sound icon|sound manager|sound operator|sound planner|sound producer|sound programming|sound sculpture|sound supervisor|sound support|souravli|source material supplier|sousaphone|Spanish guitar|Spanish vihuela|spark|special coordinator|special effects|special effects makeup|special effects supervisor|spilåpipa|spinet|spinet harpsichord|spinet piano|spinning drum|splash cymbal|spoken word|sponsor|spoons|spring drum|spring güiro|spring reverb|square piano|squeezebox|sruti box|stabule|stage director|stage engineer|stage producer|steadicam|steadicam assistant|steel drum|steel guitar|steel tongue drum|steel-string acoustic guitar|stem mastering|stereographer|stick dulcimer|stick zither|StikHarpe|stomp box|stones|story|storyboard artist|straight alto saxophone|straight tenor saxophone|street organ|string arrangements|string drum guitar|string engineer|string recording engineer|string synthesizer|strings|strings contractor|strings orchestrator|stritch|Stroh violin|structure writer|studio assistant|studio coordinator|studio personnel|stunt coordinator|stunt performer|stunt rigger|stylist|stylist assistant|stylophone|sub-contrabass balalaika|subcontrabass tubax|subtitles|subu|sueng|sugudu|suka|suling|sundatang|sundri|suona|Superbone|supervising producer|supervisor|surbahar|surdo|suupeli|Suzuki Andes|svirel|swarmandal|swarsangam|Swedish säckpipa|swing|symphonie|Synclavier|Syndrum|synthesizer|synthesizer manipulation|synthesizer operator|synthesizer pads|synthesizer programming|synthetic vocals|system engineer|sáo|sārangī|sīgǔ|t\'bel|taal|taawahekan|tabla|tabla tarang|tablak|table-top guitar|tabor|tabor pipe|tack piano|taegum|taepyeongso|Tahitian ukulele|taika|taiko|tailor|taishōgoto|talempong|talent agent|talharpa|talk box|talking drum|talutt|tam tam|tama|tamba|tambin|tambooro|tambor alegre|tambor llamador|tambor repicador|tambori|tamborim|tambour|tambouras|tambourine|tambura|tamburaško čelo|tamburello|tamburello marchigiano|tamburi|tamburica|tammorra|tanbou|tanbur|tanburag|tangent piano|tanjore|Tannerin|tantan|Taos drum|tap dancer|tap guitar|tape delay|tape loops|tape operator|tape replay keyboard|tapes|taphon|tar|tara quena|taraban|tarawangsa|Tarhu|tarija|tarima|tarka|tarol|tarota|tasha|taus|tav shvi|tavil|tañador|TB-303|tbilat|tea chest bass|technical assistant|technical director|technical production|technical supervisor|telegraph key|telenka|telephone|television|television producer|temple blocks|tenor banjo|tenor bass|tenor cornamuse|tenor cornett|tenor crumhorn|tenor drums|tenor dulcian|tenor guitar|tenor oboe|tenor pan|tenor psaltery|tenor rackett|tenor rauschpfeife|tenor recorder|tenor saxophone|tenor trombone|tenor ukulele|tenor viol|tenor violin|tenor vocals|tenora|Tenori-on|tenoroon|teponaztli|terraphone|tetsu-zutsu|teueikan|thammátama|theater organ|theorbo|theremin|third assistant camera|third assistant director|thon|three-course bouzouki|throat singing|thumbnail designer|thunder|thunder sheet|ti bwa|tianqin|Tibetan singing bell|tible|tifa|tilinkó|timba|timbal|timbales|timbalitos|timbrel|timpani|timple|tina|tindé|tingsha|tinya|tiorbino|tiple|tiptar|title card designer|title translation|titles|tlalpanhuēhuētl|tlapitzalli|to\'ere|TogaMan GuitarViol|tololoche|tom-tom|tonbak|Tonette|tongatong|tonkori|tonkorongh|topshur|torban|torototela|torupill|toubeleki|Touch Guitar|TouchMe|toudri|tour manager|touxian|toy clarinet|toy drums|toy guitar|toy instruments|toy keyboard|toy piano|toy saxophone|toy synthesizer|toy trumpet|toy xylophone|toys|tracanholas|track art|track commentary|tracking engineer|traditional dhol|train whistle|transcriber|transferring|translator|transpositeur|transverse flute|transverse mirliton flutes|transverse shakuhachi|transverso|trash can|Trautonium|treatments|treble Anglo concertina|treble flute|treble recorder|treble viol|treble violin|treble vocals|trembita|tremolo|tremoloa|tres|tres-dos|triangle|tribute to|triccheballacche|tricordia|trikitixa|trimba|triple guitar pan|triple harp|tro|tromba marina|trombone|trombonium|tromboon|trombophone|trompa de Ribagorça|Tronichord|trough zither|trumpbone|trumpet|trupé|trutruca|tréculas|trống chầu|trống cơm|tsampouna|Tsugaru shamisen|tsuzumi|tuba|tubaphone|Tubax|tube|tube drums|Tubon|tubular bells|tulum|tumba|tumur khuur|tun|tungna|tungso|tuning fork|turntable|turtle shells|tussefløyte|tuyug|tuyuk shoor|txalaparta|txistu|tyamko|tympanum|typesetting|typewriter|typography|tárogató|tār|u-bolt|uchiwa-daiko|udu|ugly stick|uhadi|uilleann pipes|ukulele|umakhweyana|umtshingo|umuduri|unit still photographer|unitar|unpitched percussion|upright piano|vaccine|vacuum cleaner|valdimbula|valide trombone|valiha|valve trombone|valve-slide trombone hybrids|valved cimbasso|variable tension chordophones|Variophone|Varitone|VCR|veena|Venezuelan cuatro|Venezuelan tambora|venu|veuze|VFX|VFX coordinator|VFX creative director|VFX producer|VFX supervisor|Vibra-Slap|Vibrandoneon|vibraphone|Vibratosax|vichitra veena|video assist operator|video commissioner|video concept|video director|video editing|video post-production|video producer|video production coordinator|video technician|videographer|vielle|viol|viola|viola amarantina|viola baixo|viola bastarda|viola beiroa|viola braguesa|viola caipira|viola caiçara|viola campaniça|viola cubana|viola d\'amore|viola de cocho|viola de fado|viola dinâmica|viole d\'Orphée|Violectra|violin|violin d\'amore|violin octet family|violin uke|violino grande|violone|virginals|virtual audio producer|vision mixer|visual collage|visual coordinator|Vitar|vivo|VJ|vocal arrangements|vocal coach|vocal consultant|vocal contractor|vocal direction|vocal editor|vocal effects|vocal engineer|vocal mixing|vocal percussion|vocal producer|vocal programming|vocal recording engineer|Vocaloid|vocals|vocoder|voice actor|voice flute|volynka|vozembouch|VR producer|vuvuzela|väikekannel|Wagner tuba|wah-wah|wah-wah pedal|wah-wah tube|walaycho|waldzither|walkie-talkie|wankara|wardrobe stylist|Warr Guitar|washboard|washint|washtub bass|wassakhoumba|water drums|water flute|watercolor|Waterphone|Wavedrum|website staff|Weissenborn|Welsh bagpipes|Western concert flute|whip|whirligig|whirling aerophones|whistle|whistling|white noise|willow flute|wind chimes|wind controller|wind gong|wind machine|wind wand|winds|wine glasses|wire viola|wobble board|wolgeum|wood blocks|wood chimes|wood flute|wooden frog|wooden horn trumpet|Woodrow|woodwind arrangements|woodwinds|wrench|writer|Wurlitzer|Xaphoon|xeremia|xiao|xiaoruan|xirula|xomus|xun|xylophone|Xylosynth|yakumo-goto|yanggeum|yangqin|yatga|yaylı tanbur|yehu|yelling|yodeling|yokobue|yoochin|yotsutake|yu|yueqin|yunluo|zabumba|zabumbateria|zambomba|zampogna|zampoña|zapateado|zena|zerbaghali|Zetland pipes|zeze|zhaleika|zhonghu|zhongruan|zhu|zhuxian|zither|Zube Tube|zuffolo|zukra|zurna|złóbcoki|çeng|çifteli|çöğür saz|çığırtma|épinette des Vosges|üçtelli sazı|čelović|đàn bầu|đàn gáo|đàn môi|đàn nguyệt|đàn nhị|đàn sến|đàn t\'rưng|đàn ta lư|đàn tam|đàn tam thập lục|đàn tranh|đàn tính|đàn tứ|đàn tỳ bà|đàn đáy|ģīga|ōdaiko|ōtsuzumi|šupelka|ūžynė'.split('|').map((x) => [x.toLowerCase(), x]));
   // Discogs roles (without "By") -> Rym roles, when the name differs
-  const ROLE_MAP = { 'mastered': 'mastering engineer', 'mastering': 'mastering engineer', 'remastered': 'remastering engineer', 'remastering': 'remastering engineer', 'lacquer cut': 'cutting engineer', 'cut': 'cutting engineer', 'dmm cut': 'direct metal mastering', 'mixed': 'mixing engineer', 'mixing': 'mixing engineer', 'mix': 'mixing engineer', 'assistant mixed': 'mixing assistant', 'additional mixed': 'additional mixing engineer', 'recorded': 'recording engineer', 'recording': 'recording engineer', 'engineered': 'engineer', 'assistant engineered': 'assistant engineer', 'remix': 'remixer', 'remixed': 'remixer', 'featuring': 'featured', 'voice': 'vocals', 'vocal': 'vocals', 'guest vocals': 'vocals', 'programmed': 'programming', 'arranged': 'arranger', 'arrangement': 'arranger', 'orchestrated': 'arranger', 'written': 'songwriter', 'songwriter': 'songwriter', 'lyrics': 'lyricist', 'words': 'lyricist', 'text': 'lyricist', 'libretto': 'librettist', 'music': 'composer', 'composed': 'composer', 'composition': 'composer', 'score': 'composer', 'artwork': 'art', 'cover': 'cover art', 'cover artwork': 'cover art', 'photo': 'photography', 'photographs': 'photography', 'paintings': 'painting', 'designed': 'design', 'sleeve design': 'sleeve design', 'illustrated': 'illustration', 'layout': 'layout', 'dj mix': 'DJ mixing', 'mixed dj': 'DJ mixing', 'turntables': 'turntable', 'scratches': 'scratching', 'turntablism': 'scratching', 'edited': 'editing', 'edit': 'editing', 'compiled': 'compiler', 'compilation': 'compiler', 'hosted': 'host', 'presented': 'presenter', 'directed': 'director', 'film director': 'director', 'narrator': 'narration', 'narrated': 'narration', 'translated': 'translator', 'translation': 'translator', 'notes': 'liner notes', 'a&r': 'artists and repertoire', 'management': 'manager', 'managed': 'manager', 'sound design': 'sound designer', 'upright bass': 'double bass', 'contrabass': 'double bass', 'acoustic bass': 'double bass', 'lap steel guitar': 'lap steel', 'shaker': 'shakers', 'beatbox': 'beat box', 'human beatbox': 'beat box', 'all instruments': 'instruments', 'synth': 'synthesizer', 'synthesizers': 'synthesizer', 'keyboard': 'keyboards', 'samples': 'sampling', 'field recording': 'field recordings', 'tape': 'tapes', 'post production': 'post-production', 'band leader': 'leader', 'bandleader': 'leader', 'choir master': 'choirmaster', 'chorus master': 'choirmaster', 'executive-producer': 'executive producer', 'producer [executive]': 'executive producer', 'additional production': 'additional producer', 'co-produced': 'co-producer', 'produced': 'producer', 'liner notes': 'liner notes', 'spoken word': 'spoken word', 'speech': 'spoken word', 'mc': 'MC', 'emcee': 'MC', 'rapper': 'rap', 'handclaps': 'handclaps', 'claps': 'handclaps' };
+  const ROLE_MAP = { 'technician': 'technical assistant', 'digital master': 'mastering engineer', 'digital mastering': 'mastering engineer', 'master': 'mastering engineer', 'cover photo': 'photography', 'artwork & design': 'design', 'all music': 'composer', 'all tracks written': 'songwriter', 'mastered': 'mastering engineer', 'mastering': 'mastering engineer', 'remastered': 'remastering engineer', 'remastering': 'remastering engineer', 'lacquer cut': 'cutting engineer', 'cut': 'cutting engineer', 'dmm cut': 'direct metal mastering', 'mixed': 'mixing engineer', 'mixing': 'mixing engineer', 'mix': 'mixing engineer', 'assistant mixed': 'mixing assistant', 'additional mixed': 'additional mixing engineer', 'recorded': 'recording engineer', 'recording': 'recording engineer', 'engineered': 'engineer', 'assistant engineered': 'assistant engineer', 'remix': 'remixer', 'remixed': 'remixer', 'featuring': 'featured', 'voice': 'vocals', 'vocal': 'vocals', 'guest vocals': 'vocals', 'programmed': 'programming', 'arranged': 'arranger', 'arrangement': 'arranger', 'orchestrated': 'arranger', 'written': 'songwriter', 'songwriter': 'songwriter', 'lyrics': 'lyricist', 'words': 'lyricist', 'text': 'lyricist', 'libretto': 'librettist', 'music': 'composer', 'composed': 'composer', 'composition': 'composer', 'score': 'composer', 'artwork': 'art', 'cover': 'cover art', 'cover artwork': 'cover art', 'photo': 'photography', 'photographs': 'photography', 'paintings': 'painting', 'designed': 'design', 'sleeve design': 'sleeve design', 'illustrated': 'illustration', 'layout': 'layout', 'dj mix': 'DJ mixing', 'mixed dj': 'DJ mixing', 'turntables': 'turntable', 'scratches': 'scratching', 'turntablism': 'scratching', 'edited': 'editing', 'edit': 'editing', 'compiled': 'compiler', 'compilation': 'compiler', 'hosted': 'host', 'presented': 'presenter', 'directed': 'director', 'film director': 'director', 'narrator': 'narration', 'narrated': 'narration', 'translated': 'translator', 'translation': 'translator', 'notes': 'liner notes', 'a&r': 'artists and repertoire', 'management': 'manager', 'managed': 'manager', 'sound design': 'sound designer', 'upright bass': 'double bass', 'contrabass': 'double bass', 'acoustic bass': 'double bass', 'lap steel guitar': 'lap steel', 'shaker': 'shakers', 'beatbox': 'beat box', 'human beatbox': 'beat box', 'all instruments': 'instruments', 'synth': 'synthesizer', 'synthesizers': 'synthesizer', 'keyboard': 'keyboards', 'samples': 'sampling', 'field recording': 'field recordings', 'tape': 'tapes', 'post production': 'post-production', 'band leader': 'leader', 'bandleader': 'leader', 'choir master': 'choirmaster', 'chorus master': 'choirmaster', 'executive-producer': 'executive producer', 'producer [executive]': 'executive producer', 'additional production': 'additional producer', 'co-produced': 'co-producer', 'produced': 'producer', 'liner notes': 'liner notes', 'spoken word': 'spoken word', 'speech': 'spoken word', 'mc': 'MC', 'emcee': 'MC', 'rapper': 'rap', 'handclaps': 'handclaps', 'claps': 'handclaps' };
   const unknownRoles = new Set();
   // electronic/club music: "Written-By" stays "writer" (whoever signs an instrumental track is not a songwriter)
   const isClub = () => /\b(electronic|house|techno|electro|trance|minimal|drum n bass|drum & bass|jungle|breakbeat|breaks|dubstep|garage|disco|idm|ambient|downtempo|dance|edm|hardcore|hardstyle|bass music|club)\b/i.test((D.genres || []).concat(D.styles || []).join(' '));
@@ -2049,9 +2828,10 @@
       cands.push(br[1]);
     } else cands.push(x);
     for (const c of cands) { const f = find(c); if (f) return f; }
+    // role Rym does not have: no credit line, only a note in the Details
     const k = norm(br ? br[1] : x);
     unknownRoles.add(k);
-    return k;
+    return '';
   }
   // Discogs tracks ("A1 to B3, B5") -> Rym: ranges with "-" that do not cross sides or discs (wiki §18.3)
   function rymTracks(spec, T) {
@@ -2075,7 +2855,8 @@
     const list = [...picked].sort((x, y) => x - y);
     const out = [];
     let start = null, prev = null;
-    const span = (a, b) => (a === b ? rows[a].pos : rows[a].pos + '-' + rows[b].pos);
+    // two tracks in a row: "1, 2" (as on well-filled releases); from three on "1-3"
+    const span = (a, b) => (a === b ? rows[a].pos : b === a + 1 ? rows[a].pos + ', ' + rows[b].pos : rows[a].pos + '-' + rows[b].pos);
     list.forEach((i) => {
       if (start != null && i === prev + 1 && unit(rows[i].pos) === unit(rows[start].pos)) { prev = i; return; }
       if (start != null) out.push(span(start, prev));
@@ -2128,10 +2909,10 @@
       });
     };
     (D.creditList || []).forEach((c) => {
-      // classical: composition credits go on the works, not on the release
-      if (D.classical && /composed by|composer|written-by|lyrics by|libretto|arranged by|music by/i.test(c.role)) return;
       const tracks = rymTracks(c.tracks, T);
       c.role.split(/,\s*(?![^\[]*\])/).forEach((r) => {
+        // classical: composition roles go on the works; the other roles of the same person stay
+        if (D.classical && COMPOSE_ROLE.test(r.trim())) return;
         // in V/A releases whoever presents or selects the collection is Rym's "compiler"
         const role = COMPILER_ROLE.test(r) && !c.tracks && vaRel ? 'compiler' : rymRole(r);
         if (!role) return;
@@ -2142,6 +2923,26 @@
         if (!g.roles.includes(role)) g.roles.push(role);
       });
     });
+    // remixers from "(Name Remix)" titles when the source has no remix credit for that person (not the artist's own remixes)
+    {
+      const ownK = [D.artist, D.artistSearch].concat((D.artistsList || []).map((a) => a.name)).filter(Boolean).map((x) => x.toLowerCase());
+      const known = new Set((D.creditList || []).filter((c) => /remix/i.test(c.role || '')).map((c) => c.name.toLowerCase()));
+      const rmx = new Map();
+      T.tracks.filter((t) => !t.header).forEach((t) => {
+        [...(t.plain || t.title || '').matchAll(/[(\[]([^()\[\]]+?)\s+(?:remix|re-?mix|rmx)\)?[)\]]/gi)].forEach((m) => {
+          const who = m[1].replace(/['’]s$/i, '').trim();
+          const k = who.toLowerCase();
+          if (!who || /^(original|extended|radio|club|dub|vocal|instrumental|official|album|single|short|long|the|a|new|\d+"?)$/i.test(who) || known.has(k) || ownK.some((o) => o === k)) return;
+          if (!rmx.has(k)) rmx.set(k, { name: who, pos: [] });
+          rmx.get(k).pos.push(t.orig || t.pos);
+        });
+      });
+      rmx.forEach((x) => {
+        const tracks = rymTracks(x.pos.join(', '), T) || x.pos.join(', ');
+        const k = x.name.toLowerCase() + '|' + tracks;
+        if (!groups.has(k)) groups.set(k, { name: x.name, roles: ['remixer'], tracks, raw: x.pos.join(', ') });
+      });
+    }
     T.featured.forEach((f) => addSpecial(f.who, 'featured', f.pos));
     T.guests.forEach((g) => addSpecial(g.who, 'guest', g.pos));
     const R = releaseMode();
@@ -2199,9 +3000,17 @@
         if (!a || !/^\[Artist\d+\]$/.test(a.value)) return;
         const code = a.value, who = pendingTrack;
         pendingTrack = null;
-        try { W.deleteCredit(n); } catch (e) { /* - */ }
-        const k = replaceTrackArtist(who, code);
-        toast(say('Collegato in ', 'Linked in ') + k + say(' tracce: ', ' tracks: ') + who + ' → ' + code);
+        // Rym name from the credit preview (it arrives a moment later): if different, "[ArtistNNN,Name in tracklist]"
+        let tries = 0;
+        const done = () => {
+          const pv = document.getElementById('credits_artist_' + n + '_preview');
+          const rymName = pv ? pv.textContent.trim() : '';
+          if (pv && !rymName && tries++ < 8) { setTimeout(done, 200); return; }
+          try { W.deleteCredit(n); } catch (e) { /* - */ }
+          const k = replaceTrackArtist(who, code, rymName);
+          toast(say('Collegato in ', 'Linked in ') + k + say(' tracce: ', ' tracks: ') + who + ' → ' + code);
+        };
+        done();
         return;
       }
       if (pendingLink == null) return;
@@ -2228,15 +3037,27 @@
     }).filter((x) => /^\[Artist\d+\]$/.test(x.code) && x.name);
   }
   function linkTrackArtists() {
-    const map = new Map(filedArtists().map((x) => [nameKey(x.name), x.code]));
-    if (!map.size) return 0;
+    const fa = filedArtists();
+    if (!fa.length) return 0;
     let n = 0;
+    // each name of the track artist ("A & B") is linked by itself; with a different Rym name the printed one is kept
     const swap = (title) => {
       const m = String(title || '').match(/^(.+?)\s+-\s+(.+)$/);
-      const code = m && map.get(nameKey(m[1]));
-      if (!code) return title;
+      if (!m) return title;
+      let hit = false;
+      const whole = fa.find((x) => nameKey(x.name) === nameKey(m[1])) || fa.find((x) => looseKey(x.name) === looseKey(m[1]));
+      const parts = whole ? [m[1]] : m[1].split(SEP);
+      const out = parts.map((p, i) => {
+        if (i % 2 || isCodeTok(p) || !p.trim()) return p;
+        const f = fa.find((x) => nameKey(x.name) === nameKey(p)) || fa.find((x) => looseKey(x.name) === looseKey(p));
+        if (!f) return p;
+        hit = true;
+        const lead = p.match(/^\s*/)[0], trail = p.match(/\s*$/)[0];
+        return lead + codeFor(f.code, p, f.name) + trail;
+      }).join('');
+      if (!hit) return title;
       n++;
-      return code + ' - ' + m[2];
+      return out + ' - ' + m[2];
     };
     document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => { if (isHeadRow(el)) return; const v = swap(el.value); if (v !== el.value) setVal(el, v); });
     const adv = $('#track_advanced');
@@ -2247,10 +3068,102 @@
     return n;
   }
   // V/A and similar: 🔍 next to every artist still in plain text in the tracklist (Simple view)
-  let pendingTrack = null, decorating = false, trackObs = null;
-  const SEP = /(\s*(?:&|,|\s+and\s+|\s+vs\.?\s+|\s+x\s+)\s*)/i;
+  let pendingTrack = null, decorating = false, trackObs = null, lastT = null;
+  let wantCollab = null, collabProfile = '';
+  const mismatchLines = new Set();
+  // credited name fields: on change the "another artist's page" warning is checked again
+  let creditedWatch = false;
+  function watchCredited() {
+    if (creditedWatch) return;
+    const els = ['#credited_name_specified', '#credited_firstname', '#credited_lastname'].map((x) => $(x)).filter(Boolean);
+    if (!els.length) return;
+    creditedWatch = true;
+    let t = 0;
+    els.forEach((el) => ['change', 'input', 'click'].forEach((ev) => el.addEventListener(ev, () => { clearTimeout(t); t = setTimeout(() => { if (panel && panel.isConnected) renderPanel(); }, 400); })));
+  }
+  const pendingUncredited = new Set();
+  // classical: 🔍 opens Rym's "work" search; the picked work replaces the line ("[WorkNNN,title as printed]")
+  let pendingWork = null, shortcutHooked = false;
+  function hookShortcut() {
+    if (shortcutHooked || typeof W.createShortcut !== 'function') return;
+    shortcutHooked = true;
+    const orig = W.createShortcut;
+    W.createShortcut = function (type, id, text) {
+      if (pendingWork && type === 'r') {
+        const { el, label } = pendingWork;
+        pendingWork = null;
+        const same = text != null && fold(text).trim() === fold(label).trim();
+        setVal(el, '[Work' + id + (label && !same ? ',' + label : '') + ']');
+        try { W.closeShortcut(); } catch (e) { /* - */ }
+        decorateTracks();
+        return undefined;
+      }
+      return orig.apply(this, arguments);
+    };
+  }
+  const plainTitle = (v) => String(v || '').replace(/\[\/?b\]/gi, '').trim();
+  function workTerm(el, inputs) {
+    const i = inputs.indexOf(el);
+    const rows = lastT && lastT.tracks.length === inputs.length ? lastT.tracks : null;
+    const r = rows ? rows[i] : null;
+    let work = r ? r.mbWork || r.work : plainTitle(el.value);
+    // no years, "(World Premiere Recording)" and the like: Rym's search ignores them
+    work = plainTitle(work).replace(/\((?:[^()]*\d{4}[^()]*|[^()]*(?:recording|premiere|live)[^()]*)\)/gi, '').replace(/\s{2,}/g, ' ').trim();
+    const comp = r && r.composer ? r.composer.replace(/\s*\(\d+\)$/, '').split(/\s+/).pop() : '';
+    return (comp ? comp + ' ' : '') + work;
+  }
+  function prefillShortcut(term) {
+    const fr = $('#shortcutsearchframe');
+    if (!fr) return;
+    let tries = 0;
+    const tick = () => {
+      tries++;
+      let done = false;
+      try {
+        const doc = fr.contentDocument;
+        const inp = doc && doc.querySelector('input[type=text], input[type=search]');
+        if (inp) {
+          inp.value = term;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          if (inp.form) { if (inp.form.requestSubmit) inp.form.requestSubmit(); else inp.form.submit(); }
+          else inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          done = true;
+        }
+      } catch (e) { done = true; }
+      if (!done && tries < 20) setTimeout(tick, 250);
+    };
+    setTimeout(tick, 300);
+  }
+  function openWork(el, term) {
+    hookShortcut();
+    pendingWork = { el, label: plainTitle(el.value) };
+    try { W.setCurrentElement(el.id); } catch (e) { /* - */ }
+    try { W.openShortcut(el); W.viewshortcut('shortcutwork', ''); } catch (e) { /* - */ }
+    try { GM_setClipboard(term); } catch (e) { /* - */ }
+    prefillShortcut(term);
+    toast(say('Cerca l\'opera: ', 'Search the work: ') + term);
+  }
+  function decorateWorks() {
+    const inputs = [...document.querySelectorAll('input[id^="track_track_title"]')];
+    inputs.forEach((el) => {
+      if (/^\s*\[Work\d+/i.test(el.value || '') || !plainTitle(el.value)) return;
+      const a = document.createElement('a');
+      a.className = 'drym_tl'; a.href = 'javascript:void(0)'; a.textContent = '🔍';
+      a.title = say('Cerca l\'opera su Rym e collegala', 'Search the work on Rym and link it');
+      css(a, { marginLeft: '4px', textDecoration: 'none', fontSize: '12px' });
+      a.addEventListener('click', () => openWork(el, workTerm(el, inputs)));
+      el.parentNode.appendChild(a);
+    });
+  }
+  // separators between artists; the comma inside "[Artist123,Name]" does not count
+  const SEP = /(\s*(?:&|,(?![^\[]*\])|\s+and\s+|\s+vs\.?\s+|\s+x\s+)\s*)/i;
+  const isCodeTok = (p) => /^\[Artist\d+(,[^\]]*)?\]$/.test(String(p || '').trim());
+  // tolerant name comparison: without leading "The", punctuation and accents
+  const looseKey = (x) => fold(x).replace(/^the\s+/, '').replace(/[^\p{L}\p{N}]+/gu, '');
+  // Rym name different from the printed one: "[ArtistNNN,Printed name]"
+  const codeFor = (code, printed, rymName) => (rymName && printed && printed.trim() !== rymName.trim() && nameKey(printed) !== nameKey(rymName) ? code.replace(/\]$/, ',' + printed.trim() + ']') : code);
   const isHeadRow = (el) => /^\s*\[b\]/i.test(el.value || '') || !((document.getElementById(el.id.replace('title', 'number')) || {}).value || '').trim();
-  function replaceTrackArtist(name, code) {
+  function replaceTrackArtist(name, code, rymName) {
     const key = nameKey(name);
     let n = 0;
     const swap = (title) => {
@@ -2258,7 +3171,7 @@
       if (!m) return title;
       const parts = m[1].split(SEP);
       let hit = false;
-      const out = parts.map((p, i) => (i % 2 === 0 && nameKey(p) === key ? (hit = true, code) : p)).join('');
+      const out = parts.map((p, i) => (i % 2 === 0 && !isCodeTok(p) && nameKey(p) === key ? (hit = true, codeFor(code, p, rymName)) : p)).join('');
       if (!hit) return title;
       n++;
       return out + ' - ' + m[2];
@@ -2277,12 +3190,13 @@
     decorating = true;
     try {
       document.querySelectorAll('.drym_tl').forEach((x) => x.remove());
+      if (D && D.classical) { decorateWorks(); return; }
       document.querySelectorAll('input[id^="track_track_title"]').forEach((el) => {
         // section lines ("[b]Love & Liberty - A Cantata[/b]") and lines without a number: no magnifier
         if (isHeadRow(el)) return;
         const m = String(el.value || '').match(/^(.+?)\s+-\s+.+$/);
         if (!m) return;
-        m[1].split(SEP).filter((p, i) => i % 2 === 0 && p.trim() && !/^\[Artist\d+\]$/.test(p.trim())).forEach((name) => {
+        m[1].split(SEP).filter((p, i) => i % 2 === 0 && p.trim() && !isCodeTok(p)).forEach((name) => {
           const a = document.createElement('a');
           a.className = 'drym_tl'; a.href = 'javascript:void(0)'; a.textContent = '🔍';
           a.title = say('Cerca ', 'Search ') + name.trim() + say(' e collegalo in tutte le tracce', ' and link it in all tracks');
@@ -2317,7 +3231,32 @@
   function watchFiledUnder() {
     const ul = $('#filed_under_performerx');
     if (!ul || filedObs) return;
-    filedObs = new MutationObserver(() => { if (linkTrackArtists()) { decorateTracks(); toast(say('Artisti collegati nella tracklist', 'Artists linked in the tracklist')); } });
+    // if the user changes the collaboration type by hand, the script leaves it alone
+    form.querySelectorAll('input[type=radio][name="collab_type"]').forEach((r) => r.addEventListener('click', (e) => { if (e.isTrusted) wantCollab = null; }));
+    filedObs = new MutationObserver(() => {
+      // Rym resets the collaboration type when file under changes: it is applied again (unless the user chose)
+      if (wantCollab && radioVal('collab_type') !== wantCollab) clickRadio('collab_type', wantCollab);
+      // collaboration: with the "A & B" profile already picked, the single artists added afterwards are uncredited
+      if (collabProfile) {
+        const lis = [...ul.querySelectorAll('li')];
+        const raw = (li) => { const a = li.querySelector('.filed_under_artist_preview'); return a ? a.textContent.trim() : ''; };
+        const isProf = (x) => !!x && (norm(x) === norm(collabProfile) || /&|\sand\s|\s\+\s/i.test(x));
+        if (lis.some((li) => isProf(raw(li)))) lis.forEach((li) => {
+          const x = raw(li), cb = li.querySelector('input[type=checkbox][id*="name_credit"]');
+          if (x && !isProf(x) && cb && cb.checked && !li.dataset.drymUncred) { li.dataset.drymUncred = '1'; cb.click(); }
+        });
+      }
+      if (pendingUncredited.size) {
+        ul.querySelectorAll('li').forEach((li) => {
+          const a = li.querySelector('.filed_under_artist_preview');
+          const cb = li.querySelector('input[type=checkbox][id*="name_credit"]');
+          const k = a ? norm(a.textContent) : '';
+          const hit = k && [...pendingUncredited].find((p) => p === k || p.includes(k) || k.includes(p));
+          if (hit && cb) { pendingUncredited.delete(hit); if (cb.checked) cb.click(); }
+        });
+      }
+      if (linkTrackArtists()) { decorateTracks(); toast(say('Artisti collegati nella tracklist', 'Artists linked in the tracklist')); }
+    });
     filedObs.observe(ul, { childList: true, subtree: true });
   }
 
@@ -2367,6 +3306,7 @@
     if (other) {
       warn.push('WARNING: this page belongs to the artist "' + other + '", the release is by "' + D.artist + '". Open the right Add release page.');
       todo.push('Page of another artist ("' + other + '"): open the Add release page of "' + D.artist + '"');
+      mismatchLines.add(warn[warn.length - 1]); mismatchLines.add(todo[todo.length - 1]);
     }
 
     // 1.2 Category and 1.3 File under (wiki "Add a release": V/A with 5+ artists, splits with 2-4, collaborations)
@@ -2374,31 +3314,38 @@
     const djNames = (D.creditList || []).filter((c) => /^dj mix/i.test(c.role) && !c.tracks).map((c) => c.name);
     const hosts = [...new Set((D.creditList || []).filter((c) => /\bhost(ed)?\b/i.test(c.role)).map((c) => c.name))];
     if (D.classical) {
-      clickRadio('category', 'classical');
+      const CP = T.cplan || classicalPlan(T);
+      if (CP.va) {
+        // no performer on at least 25%: Various Artists (non-classical), as the wiki asks
+        clickRadio('category', 'va');
+        sum.push('V/A');
+        log.push(say('Classica senza interpreti su almeno il 25% della release: Various Artists (wiki "Classical music" §2.2)', 'Classical with no performer on at least 25% of the release: Various Artists (wiki "Classical music" §2.2)'));
+      } else {
+        clickRadio('category', 'classical');
+        sum.push(say('Classica', 'Classical'));
+      }
       clickRadio('collab_type', 'not_applicable');
-      log.push(say('Categoria: Classical music release', 'Category: Classical music release'));
-      sum.push(say('Classica', 'Classical'));
-      // wiki order: orchestra, choir/ensemble, conductor, soloists
-      const rank = (p) => (/orchestra|philharmoni|symphon/i.test(p) ? 0 : /choir|chorus|ensemble|quartet|trio|consort|chor\b/i.test(p) ? 1 : /conductor/i.test(p) ? 2 : 3);
-      const perfs = [...new Set([...(D.performers || [])].sort((a, b) => rank(a) - rank(b)).map((p) => p.replace(/\s*\([^)]*\)$/, '')))];
-      warn.push(say('Classica: il "file under" va agli interpreti, non ai compositori. Collega i brani alle opere ([WorkXXXX]) come da wiki "Classical music".',
-        'Classical: "file under" goes to the performers, not the composers. Link the tracks to the works ([WorkXXXX]) as per the "Classical music" wiki.'));
-      if ((D.performers || []).length) warn.push(say('Interpreti su Discogs: ', 'Performers on Discogs: ') + D.performers.join(', ') + '.');
-      if (!filedAlready && perfs.length) searchPerformer(perfs[0]);
-      perfs.slice(filedAlready ? 0 : 1, 6).forEach((p) => find(say('Cerca interprete: ', 'Search performer: ') + p, p));
+      if (!CP.va) {
+        const first = CP.credited[0];
+        if (!filedAlready && first) searchPerformer(first.name);
+        CP.credited.slice(filedAlready ? 0 : 1).forEach((p) => find(say('Cerca: ', 'Search: ') + p.name, p.name));
+        // uncredited: after the pick on Rym the "Credited name" tick is removed by itself
+        CP.uncredited.forEach((p) => act(say('Cerca (non accreditato): ', 'Search (uncredited): ') + p.name, () => { pendingUncredited.add(norm(p.name)); watchFiledUnder(); searchPerformer(p.name); }, '#2a6fdb', true));
+        log.push('File under: ' + CP.credited.map((p) => p.name).join(', ') + (CP.uncredited.length ? say(' + non accreditati: ', ' + uncredited: ') + CP.uncredited.map((p) => p.name).join(', ') : ''));
+        // 1.4: cover wording with "&"/"and" -> "Use:"
+        if (CP.creditedName) { setCreditedName(CP.creditedName, CP.first); log.push(say('Nome accreditato: ', 'Credited name: ') + CP.creditedName); }
+      }
       // composers ("File under composer"): only those who wrote at least 25% of the release
-      const comps = [...new Set((D.creditList || []).filter((c) => /composed by|^composer|written-by|music by/i.test(c.role)).map((c) => c.name))];
-      if (comps.length) {
-        warn.push(say('Compositori in "File under composer" (almeno 25% della release): ', 'Composers in "File under composer" (at least 25% of the release): ') + comps.slice(0, 4).join(', '));
-        comps.slice(0, 6).forEach((c) => act(say('Cerca compositore: ', 'Search composer: ') + c, () => searchComposer(c), '#2a6fdb'));
+      const fc = CP.filedComposers;
+      const compFiled = !!form.querySelector('input[id^="filed_under_composer_artist_"]');
+      if (!CP.va && fc.length) {
+        if (!compFiled) searchComposer(fc[0].name);
+        fc.slice(compFiled ? 0 : 1).forEach((c) => act(say('Cerca compositore: ', 'Search composer: ') + c.name, () => searchComposer(c.name), '#2a6fdb', true));
+        log.push(say('Compositori: ', 'Composers: ') + fc.map((c) => c.name).join(', '));
       }
-      // title: performer names standing apart from the title are removed
-      const perfName = perfs.find((p) => new RegExp('[(\\[-–:]\\s*' + escRe(p) + '\\s*[)\\]]?\\s*$', 'i').test(T.title));
-      if (perfName) {
-        const cut = T.title.replace(new RegExp('\\s*[(\\[-–:]\\s*' + escRe(perfName) + '\\s*[)\\]]?\\s*$', 'i'), '').trim();
-        if (cut) act(say('Titolo senza l\'interprete: ', 'Title without the performer: ') + cut, () => setVal($('#title'), cut), '#8e44ad');
-      }
-      warn.push(say('Classica: nel titolo separa con ";" le opere dello stesso compositore e con "/" quelle di compositori diversi.', 'Classical: in the title separate works by the same composer with ";" and works by different composers with "/".'));
+      const small = CP.composers.filter((c) => c.share != null && c.share < 0.25);
+      if (small.length) log.push(say('Compositori sotto il 25%, fuori dal file under: ', 'Composers under 25%, left out of file under: ') + small.map((c) => c.name).join(', '));
+      warn.push(say('Classica: con 🔍 nella tracklist collega ogni traccia alla sua opera; poi "Get composers from Works" riempie i compositori.', 'Classical: with 🔍 in the tracklist link each track to its work; then "Get composers from Works" fills the composers.'));
     } else if (D.various && mdesc.includes('Mixed') && djNames.length) {
       // DJ mix: filed under the DJ, not Various Artists, if the release is credited to them
       if (!filedAlready) searchPerformer(djNames[0]);
@@ -2410,27 +3357,34 @@
       clickRadio('category', 'va');
       log.push(say('Categoria: Various Artists', 'Category: Various Artists') + (RM.distinct.length ? ' (' + RM.distinct.length + say(' artisti', ' artists') + ')' : ''));
       sum.push('V/A');
-      warn.push(say('V/A: collega gli artisti nella tracklist con "Insert link to artist".', 'V/A: link the artists in the tracklist with "Insert link to artist".'));
     } else {
       clickRadio('category', 'multi');
       const names = RM.fileUnder.length ? RM.fileUnder : [D.artistSearch].filter(Boolean);
+      wantCollab = null;
       if (RM.mode === 'split') {
-        clickRadio('collab_type', 'split');
+        clickRadio('collab_type', 'split'); wantCollab = 'split';
         log.push(say('Split: ', 'Split: ') + names.join(' / '));
         sum.push('Split');
       } else if (RM.mode === 'collab') {
-        clickRadio('collab_type', 'collab');
+        clickRadio('collab_type', 'collab'); wantCollab = 'collab';
         log.push(say('Collaborazione: ', 'Collaboration: ') + names.join(' & '));
-        warn.push(say('Collaborazione: se esiste un profilo per "', 'Collaboration: if a profile for "') + names.join(' & ') +
-          say('" va nel file under (accreditato) e i singoli artisti senza "Credited name". Altrimenti solo i singoli artisti.', '" exists, file it (credited) and the single artists without "Credited name". Otherwise only the single artists.'));
-        const collabName = names.join(' & ');
-        find(say('Cerca il profilo "', 'Search the profile "') + collabName + '"', collabName);
+      } else if (RM.mode === 'mixed') {
+        clickRadio('collab_type', 'not_applicable'); wantCollab = 'not_applicable';
+        log.push(say('Più artisti, tracce miste (da soli e insieme): tipo "Not applicable"', 'Several artists, mixed tracks (alone and together): "Not applicable" type'));
       }
-      if (!filedAlready && names.length) {
-        searchPerformer(names[0]);
+      // collaboration: first the "A & B" profile is searched; if it exists, the single artists are added uncredited (wiki "Collaborations" §3)
+      const collabName = RM.mode === 'collab' ? joinNames(names.join(' & ')) : '';
+      if (collabName) {
+        collabProfile = collabName;
+        if (!filedAlready) searchPerformer(collabName);
+        names.forEach((n) => find(say('Cerca: ', 'Search: ') + n, n));
+        warn.push(say('Collaborazione: se Rym ha il profilo "', 'Collaboration: if Rym has the "') + collabName + say('", sceglilo; poi i singoli artisti vengono aggiunti non accreditati. Altrimenti scegli solo i singoli.', '" profile, pick it; then the single artists are added uncredited. Otherwise pick only the single artists.'));
+      } else {
+        collabProfile = '';
+        if (!filedAlready && names.length) searchPerformer(names[0]);
+        // only with several artists: with just one the search starts by itself
+        if (names.length > 1) names.slice(filedAlready ? 0 : 1).forEach((n) => find(say('Cerca: ', 'Search: ') + n, n));
       }
-      // only with several artists: with just one the search starts by itself
-      if (names.length > 1) names.slice(filedAlready ? 0 : 1).forEach((n) => find(say('Cerca: ', 'Search: ') + n, n));
       // 1.4 credited name: with "feat."/"with" or a name variation (ANV)
       const anvDiff = (D.artistsList || []).some((a) => a.anv && norm(a.anv) !== norm(a.name));
       if (RM.featured.length || RM.guests.length || anvDiff) {
@@ -2511,7 +3465,6 @@
     }
     if (D.preorder) warn.push(say('Pre-order: su Rym le uscite future vanno solo se annunciate con titolo e data (anno in corso o prossimo).', 'Pre-order: on Rym upcoming releases are allowed only when announced with title and date (this year or next).'));
     if (D.partOfAlbum) { warn.push(say('Questa traccia fa parte di un album: non è un singolo a sé, salvo che sia uscita anche come singolo.', 'This track belongs to an album: it is not a standalone single, unless it was also released as a single.')); todo.push(say('Traccia di un album: verifica che esista come singolo', 'Track from an album: check it exists as a single')); }
-    if (SRC === 'Bandcamp') warn.push('The Bandcamp date is sometimes the upload date: check it.');
     if (SRC === 'Bandcamp' && D.physicalApplied) warn.push(say('Edizione fisica da Bandcamp: data, etichetta, catalogo e paese vanno verificati sul disco.', 'Physical edition from Bandcamp: date, label, catalog number and country need checking on the item.'));
 
     // 2.1 Title (+ result of the capitalization fix)
@@ -2546,9 +3499,7 @@
     else if (fmt === 95) { todo.push('Set Disc size (3.2)'); }
 
     // 3.3 / 3.4 Label and catalog number (wiki "Catalog numbers")
-    //  - no label: label "(No Label)" and catalog "n/a" (if Discogs gives no number)
-    //  - physical, on a label, no number: "n/a"
-    //  - digital, on a label, no number: blank
+    //  - without a catalog number the field stays empty, never "n/a" (user choice)
     const pick = pickLabel(D.labels || []);
     const lab = pick.lab;
     if (pick.distributor) todo.push(say('«' + lab.name + '» è un distributore digitale, non un\'etichetta: su Rym probabilmente "(No Label)"', '«' + lab.name + '» is a digital distributor, not a label: on Rym probably "(No Label)"'));
@@ -2561,8 +3512,6 @@
       if (lf) lf.src = '/go/search?searchtype=b&searchterm=' + encodeURIComponent(labelSearch);
     }
     let catno = lab ? lab.catno : '';
-    if (noLabel && !catno) catno = 'n/a'; // no label: "n/a" only if there is no catalog number
-    else if (lab && !catno && lab.noCat && !digital) catno = 'n/a';
     // things that are not catalog numbers (wiki "Catalog numbers" §8)
     const bad = badCatno(catno, lab && lab.name);
     if (bad) {
@@ -2577,7 +3526,6 @@
     if (setVal($('#catalog_no'), catno)) { log.push('Catalog #: ' + catno); sum.push('cat. ' + catno); }
     // V/A: the label classifier ([LabelXXXX]) is mandatory: it is filled as soon as you pick the label
     if (radioVal('category') === 'va') {
-      warn.push(say('V/A: dopo aver scelto l\'etichetta, il campo "Label(s)" dei classifier si compila da solo', 'V/A: after you pick the label, the classifiers "Label(s)" field fills in by itself'));
       watchVaLabel();
       if ((D.series || []).length) todo.push(say('Serie su Discogs: ', 'Series on Discogs: ') + D.series.join(', ') + say(' → cerca il classifier ([DescriptorXXXX]) con "open list"', ' → look up the classifier ([DescriptorXXXX]) with "open list"'));
       const trib = (D.title || '').match(/\btribute to\s+(.+?)\s*$/i);
@@ -2715,7 +3663,7 @@
     }
     // lyrics languages (primary issue only): estimate from the titles, to confirm
     const langs = lyricLanguages(T);
-    if (langs.length && primary) {
+    if (langs.length && primary && !D.classical) {
       act(say('Lingue: ', 'Languages: ') + langs.join(', '), () => { setVal($('#languages'), langs.join(', ')); touched.fields.add('languages'); }, '#2a6fdb');
     }
     const flagWarn = T.warn.find((w) => w.startsWith('Capitalization: check'));
@@ -2728,6 +3676,7 @@
         $('#track_advanced').value = T.tracks.map((t) => t.pos + '|' + t.title + '|' + t.dur).join('\n');
         W.goSimple();
         touched.tracks = true;
+        lastT = T;
         linkTrackArtists();
         decorateTracks();
         watchTracks();
@@ -2763,7 +3712,7 @@
     const lines = creditLines(T);
     if (lines.length) {
       act(say('Aggiungi ', 'Add ') + lines.length + (lines.length === 1 ? say(' riga di crediti', ' credit line') : say(' righe di crediti', ' credit lines')) + say(' (poi collega con 🔍)', ' (then link with 🔍)'), () => addCreditLines(lines), '#27ae60');
-      if (unknownRoles.size) todo.push(say('Ruoli non trovati nella lista Rym, correggili: ', 'Roles not found in the Rym list, fix them: ') + [...unknownRoles].join(', '));
+      if (unknownRoles.size) warn.push(say('Ruoli che Rym non ha, non scritti nei crediti: ', 'Roles Rym does not have, left out of the credits: ') + [...unknownRoles].join(', '));
       if (!primary) warn.push(say('Issue secondaria: aggiungi solo i crediti che non sono già sulla primary (es. bonus track, featured, remixer).', 'Secondary issue: add only the credits not already on the primary (e.g. bonus tracks, featured, remixers).'));
     }
     if (desc.includes('Promo')) { todo.push('Promo: add it as a secondary issue (1.1)'); }
@@ -2787,8 +3736,37 @@
   const banner = (text, color) => '<div style="background:' + color + ';color:#fff;border-radius:4px;padding:6px;margin:6px 0">' + esc(text) + '</div>';
 
   // (Re)draws the panel with the current release; reopens it if it was closed
+  // "Import from link": paste the URL of a release (Discogs, Bandcamp, Beatport, MusicBrainz, Apple Music, Deezer) without opening it
+  function importRow() {
+    const row = css(document.createElement('div'), { margin: '6px 3px 2px', display: 'flex', gap: '4px' });
+    row.innerHTML = '<input id="drym_link" type="text" placeholder="' + esc(say('Importa da link…', 'Import from link…')) + '" style="flex:1;min-width:0;font-size:12px;padding:3px">';
+    const inp = row.querySelector('input');
+    const go = () => {
+      const v = inp.value.trim();
+      if (!v) return;
+      b2.textContent = '…';
+      importFromLink(v, (data) => {
+        b2.textContent = say('Importa', 'Import');
+        sendToRym(data);
+        onNewData(GM_getValue(KEY));
+        if (!panel.isConnected) document.body.appendChild(panel);
+      }, (why) => { b2.textContent = say('Importa', 'Import'); toast(say('Importazione non riuscita: ', 'Import failed: ') + why, false); });
+    };
+    const b2 = btn(say('Importa', 'Import'), go, '#2a6fdb');
+    css(b2, { margin: '0' });
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+    row.appendChild(b2);
+    return row;
+  }
   function renderPanel() {
-    if (!D) return;
+    if (!D) {
+      // no release yet: only the "Import from link" field
+      panel.innerHTML = '<div style="font-weight:bold;font-size:15px;margin-bottom:4px">Postino<a id="drym_x" href="javascript:void(0)" style="float:right;color:inherit;text-decoration:none;opacity:.6">✕</a></div>';
+      panel.querySelector('#drym_x').addEventListener('click', () => panel.remove());
+      panel.appendChild(importRow());
+      if (!panel.isConnected) document.body.appendChild(panel);
+      return;
+    }
     const lab0 = (D.labels || [])[0] || {};
     const when = D.savedAt ? new Date(D.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
     const other = artistMismatch();
@@ -2806,29 +3784,24 @@
 
     const bar = panel.querySelector('#drym_bar');
     watchFiledUnder();
+    watchCredited();
+    panel.insertBefore(importRow(), bar);
     panel.querySelector('#drym_x').addEventListener('click', () => panel.remove());
     bar.appendChild(btn('Fill form', fill, '#27ae60'));
     if (other) bar.appendChild(btn('Search "' + D.artistSearch + '" on Rym', () => GM_openInTab('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent(D.artistSearch) + '&searchtype=a', { active: true }), '#b03a2e'));
     if (D.artUrl) bar.appendChild(btn(say('Copertina originale', 'Original cover'), () => GM_openInTab(D.artUrl, { active: true }), '#2a6fdb'));
-    if (D.embed) bar.appendChild(btn(say('Copia embed (media link)', 'Copy embed (media link)'), () => { GM_setClipboard(D.embed); toast(say('Embed copiato: incollalo in "Submit media links" sulla pagina della release.', 'Embed copied: paste it in "Submit media links" on the release page.')); }, '#2a6fdb'));
     if (D.physicalApplied) bar.appendChild(btn(say('Torna al digitale', 'Back to digital'), () => { rawSeen = null; D = null; loadData(); renderPanel(); }, '#555'));
     bar.appendChild(btn('Clear data', () => { GM_deleteValue(KEY); D = null; panel.remove(); }, '#7f1d1d'));
 
-    // checkbox explanations in the tooltip, to keep the panel short
-    const lbl = css(document.createElement('label'), { display: 'block', margin: '3px', cursor: 'pointer' });
-    const C = capsState();
-    lbl.title = say('Senza spunta: solo iniziale maiuscola (titoli non inglesi)', 'Unticked: first letter only (non-English titles)') + (C.auto ? say('. Ora in automatico, titolo per titolo, secondo la lingua.', '. Now automatic, title by title, by language.') : '');
-    lbl.innerHTML = '<input type="checkbox" id="drym_caps"' + (C.english ? ' checked' : '') + '> ' + esc(say('Capitalizzazione inglese', 'English capitalization')) +
-      (C.auto ? ' <span style="opacity:.6;font-size:11px">(auto)</span>' : '');
-    lbl.querySelector('input').addEventListener('change', (e) => { capsMode = e.target.checked; settingsChanged = true; renderPanel(); });
-    bar.appendChild(lbl);
-    if (keepCaps) lbl.querySelector('input').disabled = true;
-
-    const kc = css(document.createElement('label'), { display: 'block', margin: '3px', cursor: 'pointer' });
-    kc.title = say('Solo per grafie ufficiali ammesse dalla wiki (es. nomi o titoli stilizzati)', 'Only for official stylings allowed by the wiki (e.g. stylized names or titles)');
-    kc.innerHTML = '<input type="checkbox" id="drym_keepcaps"' + (keepCaps ? ' checked' : '') + '> ' + esc(say('Maiuscole come sulla fonte', 'Keep source capitalization'));
-    kc.querySelector('input').addEventListener('change', (e) => { keepCaps = e.target.checked; settingsChanged = true; renderPanel(); });
-    bar.appendChild(kc);
+    // capitalization: one selector for the title and one for the tracklist (Auto / English / Other language / As on source)
+    const capRow = css(document.createElement('div'), { margin: '3px', fontSize: '12px' });
+    const opts = [['auto', 'Auto'], ['en', say('Inglese', 'English')], ['other', say('Altra lingua', 'Other language')], ['keep', say('Come sulla fonte', 'As on source')]];
+    const sel = (id, val) => '<select id="' + id + '" style="font-size:11px;margin:0 6px 0 3px">' + opts.map(([v, l]) => '<option value="' + v + '"' + (v === val ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select>';
+    capRow.title = say('Auto: titolo per titolo secondo la lingua. Altra lingua: solo iniziale (tedesco: sostantivi maiuscoli). Come sulla fonte: solo per grafie ufficiali ammesse dalla wiki.', 'Auto: title by title by language. Other language: first letter only (German: capitalized nouns). As on source: only for official stylings allowed by the wiki.');
+    capRow.innerHTML = esc(say('Maiuscole – titolo', 'Caps – title')) + sel('drym_capt', capsTitle) + esc('tracklist') + sel('drym_capr', capsTracks);
+    capRow.querySelector('#drym_capt').addEventListener('change', (e) => { capsTitle = e.target.value; settingsChanged = true; renderPanel(); });
+    capRow.querySelector('#drym_capr').addEventListener('change', (e) => { capsTracks = e.target.value; settingsChanged = true; renderPanel(); });
+    bar.appendChild(capRow);
 
     // physical editions on sale on Bandcamp
     if (SRC === 'Bandcamp' && (D.physical || []).length && !D.physicalApplied) {
@@ -2864,6 +3837,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) onNewData(); });
   window.addEventListener('pageshow', (e) => { if (e.persisted) onNewData(); });
   onNewData();
+  if (!D) renderPanel();
 
   // Summary: green line (what was filled in), "To do" (only what needs action),
   // and everything else in "Details", collapsed by default.
@@ -2874,7 +3848,7 @@
       // short panel: no "To do"; the useful notes sit at the top of the Details (collapsed)
       '<div style="color:#7dda8a;font-size:12px">✔ ' + say('Compilato', 'Filled') + '</div>' +
       '<details style="margin-top:6px;opacity:.8;font-size:12px"><summary style="cursor:pointer">Details</summary>' +
-      [...new Set(R.todo.concat(R.details))].map((d) => '<div>' + esc(d) + '</div>').join('') + '</details>';
+      [...new Set(R.todo.concat(R.details))].filter((d) => !(mismatchLines.has(d) && !artistMismatch())).map((d) => '<div>' + esc(d) + '</div>').join('') + '</details>';
     const suggested = (actions || []).filter((a) => a.title != null).map((a) => a.title);
     (actions || []).filter((a) => a.title == null && !(a.once && a.done)).forEach((a) => {
       out.appendChild(btn(a.label, (e) => {
